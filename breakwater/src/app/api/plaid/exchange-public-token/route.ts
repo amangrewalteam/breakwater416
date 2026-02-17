@@ -1,44 +1,41 @@
 import { NextResponse } from "next/server";
-import { plaidClient } from "@/lib/plaid";
-import { supabaseServer } from "@/lib/supabase/server";
-import { CountryCode } from "plaid";
+import { plaidClient, assertPlaidEnv } from "@/lib/plaid";
 
 export async function POST(req: Request) {
-  const supabase = await supabaseServer();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-
-  const body = await req.json();
-  const public_token: string = body.public_token;
-
-  const exchange = await plaidClient.itemPublicTokenExchange({ public_token });
-  const access_token = exchange.data.access_token;
-  const item_id = exchange.data.item_id;
-
-  // Institution name is nice-to-have; fetch quickly
-  let institution_name: string | undefined;
   try {
-    const item = await plaidClient.itemGet({ access_token });
-    const instId = item.data.item.institution_id;
-    if (instId) {
-      const inst = await plaidClient.institutionsGetById({
-        institution_id: instId,
-        country_codes: [CountryCode.Ca, CountryCode.Us],
-      });
-      institution_name = inst.data.institution.name;
+    assertPlaidEnv();
+
+    const body = await req.json().catch(() => ({}));
+    const public_token = body?.public_token;
+
+    if (!public_token || typeof public_token !== "string") {
+      return NextResponse.json(
+        { error: "Missing public_token in request body." },
+        { status: 400 }
+      );
     }
-  } catch {}
 
-  const { error } = await supabase.from("plaid_items").upsert({
-    user_id: user.id,
-    item_id,
-    access_token,
-    institution_name: institution_name ?? null,
-  });
+    const exchange = await plaidClient.itemPublicTokenExchange({ public_token });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true });
+    // In a real app, you'd store access_token + item_id in DB tied to the user.
+    // For dev, we just return them.
+    return NextResponse.json({
+      access_token: exchange.data.access_token,
+      item_id: exchange.data.item_id,
+    });
+  } catch (e: any) {
+    const payload = e?.response?.data || null;
+    console.error("exchange-public-token error:", payload || e);
+
+    return NextResponse.json(
+      {
+        error:
+          payload?.error_message ||
+          e?.message ||
+          "Token exchange failed",
+        plaid: payload || undefined,
+      },
+      { status: 500 }
+    );
+  }
 }

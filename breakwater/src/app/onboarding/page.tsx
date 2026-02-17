@@ -10,20 +10,43 @@ import { useRouter } from "next/navigation";
 export default function OnboardingPage() {
   const router = useRouter();
   const supabase = supabaseBrowser();
+
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [checking, setChecking] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      setUserEmail(data.user?.email ?? null);
-      if (!data.user) router.replace("/login");
-    });
+    let alive = true;
+
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getUser();
+
+        if (!alive) return;
+
+        // If no user session, send to login
+        if (!data.user) {
+          router.replace("/login");
+          return;
+        }
+
+        setUserEmail(data.user.email ?? null);
+      } finally {
+        if (alive) setChecking(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
   }, [router, supabase]);
 
   async function afterConnected() {
     // Sync transactions + compute recurring, then go dashboard
     await fetch("/api/plaid/sync", { method: "POST" });
     await fetch("/api/recurring/recompute", { method: "POST" });
-    router.push("/dashboard");
+
+    // Use replace to prevent back button / bounce loops
+    router.replace("/dashboard");
   }
 
   return (
@@ -34,7 +57,7 @@ export default function OnboardingPage() {
         <button
           onClick={async () => {
             await supabase.auth.signOut();
-            router.push("/");
+            router.replace("/");
           }}
           style={{
             color: ink,
@@ -51,12 +74,22 @@ export default function OnboardingPage() {
     >
       <div style={{ display: "grid", gap: 14, maxWidth: 720 }}>
         <div style={{ color: inkSoft }}>
-          Signed in as <span style={{ color: ink }}>{userEmail ?? "…"}</span>
+          Signed in as{" "}
+          <span style={{ color: ink }}>
+            {checking ? "…" : userEmail ?? "dev"}
+          </span>
         </div>
+
         <PlaidConnectButton onConnected={afterConnected} />
+
         <div style={{ color: inkSoft, maxWidth: 560 }}>
-          V1 reads transactions to detect recurring merchants. No cancellations happen
-          automatically — you stay in control.
+          V1 reads transactions to detect recurring merchants. No cancellations
+          happen automatically — you stay in control.
+        </div>
+
+        <div style={{ color: inkSoft }}>
+          Dev mode: email login is temporarily bypassed due to provider rate
+          limits.
         </div>
       </div>
     </Shell>

@@ -1,61 +1,52 @@
 "use client";
-export const dynamic = "force-dynamic";
 
 import { useEffect, useState } from "react";
 import Shell from "@/components/Shell";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 import { ink, inkSoft, line } from "@/lib/style";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 
-type Row = {
-  id: string;
-  merchant_name: string;
-  cadence: string;
-  avg_amount: number;
-  last_date: string;
-  confidence: number;
-};
+function clearDevCookie() {
+  document.cookie = "bw_dev_auth=; path=/; max-age=0";
+}
 
 export default function DashboardPage() {
   const router = useRouter();
   const supabase = supabaseBrowser();
-  const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(true);
 
-  async function load() {
-    setLoading(true);
-    const { data: user } = await supabase.auth.getUser();
-    if (!user.user) {
-      router.replace("/login");
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("recurring")
-      .select("*")
-      .order("avg_amount", { ascending: false });
-
-    if (!error && data) setRows(data as any);
-    setLoading(false);
-  }
+  const [ready, setReady] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [devAuthed, setDevAuthed] = useState(false);
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const dev = localStorage.getItem("bw_dev_auth") === "1";
+    setDevAuthed(dev);
+
+    supabase.auth.getUser().then(({ data }) => {
+      setUserEmail(data.user?.email ?? null);
+
+      // ✅ allow dev auth even with no Supabase user
+      if (!data.user && !dev) router.replace("/login");
+      else setReady(true);
+    });
+  }, [router, supabase]);
+
+  async function exit() {
+    localStorage.removeItem("bw_dev_auth");
+    clearDevCookie();
+    await supabase.auth.signOut();
+    router.push("/login");
+  }
+
+  if (!ready) return null;
 
   return (
     <Shell
-      title="Recurring"
-      subtitle="What keeps coming back."
+      title="Dashboard"
+      subtitle="Your recurring picture, surfaced quietly."
       right={
         <button
-          onClick={async () => {
-            await fetch("/api/plaid/sync", { method: "POST" });
-            await fetch("/api/recurring/recompute", { method: "POST" });
-            await load();
-          }}
+          onClick={exit}
           style={{
             color: ink,
             border: `1px solid ${line}`,
@@ -65,38 +56,22 @@ export default function DashboardPage() {
             cursor: "pointer",
           }}
         >
-          Sync
+          Exit
         </button>
       }
     >
-      {loading ? (
-        <div style={{ color: inkSoft }}>Gathering the tide line…</div>
-      ) : rows.length === 0 ? (
+      <div style={{ display: "grid", gap: 12, maxWidth: 720 }}>
         <div style={{ color: inkSoft }}>
-          No recurring merchants detected yet. Try syncing again after a few minutes.
+          Signed in as{" "}
+          <span style={{ color: ink }}>
+            {userEmail ?? (devAuthed ? "dev" : "…")}
+          </span>
         </div>
-      ) : (
-        <div style={{ display: "grid", gap: 10 }}>
-          {rows.map((r) => (
-            <Link
-              key={r.id}
-              href={`/subscriptions/${r.id}`}
-              style={{
-                textDecoration: "none",
-                border: `1px solid ${line}`,
-                borderRadius: 16,
-                padding: 14,
-                background: "rgba(255,255,255,0.22)",
-              }}
-            >
-              <div style={{ color: ink, fontSize: 18 }}>{r.merchant_name}</div>
-              <div style={{ color: inkSoft, marginTop: 6 }}>
-                {r.cadence} · ~${Number(r.avg_amount).toFixed(2)} · last {r.last_date}
-              </div>
-            </Link>
-          ))}
+
+        <div style={{ color: inkSoft }}>
+          (Next) Render your recurring subscriptions list here.
         </div>
-      )}
+      </div>
     </Shell>
   );
 }

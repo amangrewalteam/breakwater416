@@ -1,51 +1,101 @@
 import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabase/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 import { plaidClient } from "@/lib/plaid";
+import { devBypassAllowedFromRequest } from "@/lib/devAuth";
 
-export async function POST() {
-  const supabase = await supabaseServer();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+declare global {
+  // eslint-disable-next-line no-var
+  var __BW_DEV_PLAID__: { access_token?: string; item_id?: string; cursor?: string } | undefined;
+  // eslint-disable-next-line no-var
+  var __BW_DEV_TXNS__: any[] | undefined;
+}
 
-  const { data: items, error: itemsErr } = await supabase
-    .from("plaid_items")
-    .select("access_token")
-    .eq("user_id", user.id);
+function getSupabase() {
+  const cookieStore = cookies();
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
+}
 
-  if (itemsErr) return NextResponse.json({ error: itemsErr.message }, { status: 500 });
-  if (!items || items.length === 0) return NextResponse.json({ ok: true, synced: 0 });
+export async function POST(req: Request) {
+  const bypass = devBypassAllowedFromRequest(req);
 
-  // last 180 days (enough to detect recurring)
-  const end = new Date();
-  const start = new Date(end.getTime() - 180 * 24 * 60 * 60 * 1000);
-
-  let upserted = 0;
-
-  for (const it of items) {
-    const tx = await plaidClient.transactionsGet({
-      access_token: it.access_token,
-      start_date: start.toISOString().slice(0, 10),
-      end_date: end.toISOString().slice(0, 10),
-      options: { count: 500, offset: 0 },
-    });
-
-    const rows = tx.data.transactions.map((t) => ({
-      user_id: user.id,
-      plaid_transaction_id: t.transaction_id,
-      merchant_name: t.merchant_name ?? null,
-      name: t.name ?? null,
-      amount: t.amount ?? null,
-      date: t.date,
-      pending: t.pending ?? false,
-    }));
-
-    const { error } = await supabase.from("transactions").upsert(rows);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-    upserted += rows.length;
+  if (!bypass) {
+    const supabase = getSupabase();
+    const { data } = await supabase.auth.getUser();
+    if (!data.user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  return NextResponse.json({ ok: true, synced: upserted });
+  try {
+    const store = (globalThis.__BW_DEV_PLAID__ = globalThis.__BW_DEV_PLAID__ || {});
+    const access_token = store.access_token;
+
+    if (!access_token) {
+      return NextResponse.json(
+        { error: "No access_token found. Connect a bank first." },
+        { status: 400 }
+      );
+    }
+
+    let cursor = store.cursor;
+    let added: any[] = [];
+    let modified: any[] = [];
+    let removed: any[] = [];
+    let has_more = true;
+
+    while (has_more) {
+      const resp = await plaidClient.transactionsSync({
+        access_token,
+        cursor: cursor || undefined,
+      });
+
+      added = added.concat(resp.data.added || []);
+      modified = modified.concat(resp.data.modified || []);
+      removed = removed.concat(resp.data.removed || []);
+      has_more = !!resp.data.has_more;
+      cursor = resp.data.next_cursor;
+    }
+
+    store.cursor = cursor;
+
+    globalThis.__BW_DEV_TXNS__ = globalThis.__BW_DEV_TXNS__ || [];
+    const byId = new Map(globalThis.__BW_DEV_TXNS__!.map((t: any) => [t.transaction_id, t]));
+    for (const t of added) byId.set(t.transaction_id, t);
+    for (const t of modified) byId.set(t.transaction_id, t);
+    for (const r of removed) byId.delete(r.transaction_id);
+
+    globalThis.__BW_DEV_TXNS__ = Array.from(byId.values());
+
+    return NextResponse.json({
+      ok: true,
+      cursor,
+      counts: { added: added.length, modified: modified.length, removed: removed.length },
+      transactions: globalThis.__BW_DEV_TXNS__,
+    });
+  } catch (e: any) {
+    console.error("plaid sync error:", e?.response?.data || e);
+    return NextResponse.json(
+      {
+        error:
+          e?.response?.data?.error_message ||
+          e?.message ||
+          "Failed to sync transactions",
+      },
+      { status: 500 }
+    );
+  }
 }

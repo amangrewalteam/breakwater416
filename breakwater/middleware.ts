@@ -1,12 +1,17 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-export function middleware(req: NextRequest) {
-  // Keep v1 simple: no hard auth gating here.
-  // We do client-side checks. You can add cookie-based gating in v1.1.
+export function middleware(_req: NextRequest) {
+  // In dev, do not gate routes server-side.
+  // This prevents bouncing due to missing Supabase cookies while you're using dev bypass.
+  if (process.env.NODE_ENV !== "production") {
+    return NextResponse.next();
+  }
+
+  // Production: allow request through (you can tighten later)
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/subscriptions/:path*", "/onboarding/:path*"],
+  matcher: ["/onboarding/:path*", "/dashboard/:path*"],
 };
