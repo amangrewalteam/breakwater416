@@ -2,6 +2,8 @@
 import fs from "fs";
 import path from "path";
 
+export type Confidence = "high" | "med" | "low";
+
 export type StoredSubscription = {
   id: string;
   name: string;
@@ -16,6 +18,11 @@ export type StoredSubscription = {
 
   status: "suggested" | "confirmed" | "ignored";
   category?: string;
+
+  // Phase 3.2
+  confidence?: Confidence;
+  needsReview?: boolean;
+  reason?: string[];
 
   updatedAt: string;
 };
@@ -54,6 +61,10 @@ export function upsertMany(incoming: StoredSubscription[]) {
         ...prev,
         lastSeen: s.lastSeen ?? prev.lastSeen,
         occurrences: s.occurrences ?? prev.occurrences,
+        // allow confidence/needsReview to update (informational) without changing status
+        confidence: s.confidence ?? prev.confidence,
+        needsReview: s.needsReview ?? prev.needsReview,
+        reason: s.reason ?? prev.reason,
         updatedAt: nowISO(),
       });
       continue;
@@ -62,8 +73,11 @@ export function upsertMany(incoming: StoredSubscription[]) {
     map.set(s.id, {
       ...(prev || {}),
       ...s,
-      status: prev?.status ?? "suggested",
+      status: prev?.status ?? s.status ?? "suggested",
       category: prev?.category ?? s.category,
+      confidence: s.confidence ?? prev?.confidence,
+      needsReview: typeof s.needsReview === "boolean" ? s.needsReview : prev?.needsReview,
+      reason: s.reason ?? prev?.reason,
       updatedAt: nowISO(),
     });
   }
@@ -89,8 +103,7 @@ export function updateSubscription(
     const nextNormalized = patch.normalized ?? s.normalized;
     const nextAmount = typeof patch.amount === "number" ? patch.amount : s.amount;
     const nextCadence = (patch.cadence ?? s.cadence) as "monthly" | "yearly";
-    const nextAnnual =
-      nextCadence === "monthly" ? nextAmount * 12 : nextAmount;
+    const nextAnnual = nextCadence === "monthly" ? nextAmount * 12 : nextAmount;
 
     return {
       ...s,

@@ -1,4 +1,7 @@
 // src/app/api/subscriptions/route.ts
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import {
   readSubscriptions,
@@ -23,7 +26,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Minimal validation
     const incoming: StoredSubscription[] = suggestions
       .filter((s: any) => s && typeof s.id === "string")
       .map((s: any) => s as StoredSubscription);

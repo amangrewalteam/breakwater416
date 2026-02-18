@@ -1,6 +1,9 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { CATEGORIES } from "@/lib/subscriptionRules";
+
+type Confidence = "high" | "med" | "low";
 
 type StoredSubscription = {
   id: string;
@@ -13,6 +16,11 @@ type StoredSubscription = {
   occurrences?: number;
   status: "suggested" | "confirmed" | "ignored";
   category?: string;
+
+  confidence?: Confidence;
+  needsReview?: boolean;
+  reason?: string[];
+
   updatedAt: string;
 };
 
@@ -20,19 +28,6 @@ const IVORY = "#F6F3EE";
 const INK = "rgba(20, 16, 12, 0.86)";
 const MUTED = "rgba(20, 16, 12, 0.62)";
 const BORDER = "rgba(20, 16, 12, 0.14)";
-const CARD_BG = "rgba(255, 255, 255, 0.36)";
-
-const CATEGORIES = [
-  "",
-  "SaaS",
-  "Media",
-  "Utilities",
-  "Finance",
-  "Health",
-  "Home",
-  "Travel",
-  "Other",
-];
 
 function currency(n: number) {
   try {
@@ -52,6 +47,7 @@ export default function SubscriptionsPage() {
 
   const [subs, setSubs] = useState<StoredSubscription[]>([]);
   const [showIgnored, setShowIgnored] = useState(false);
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
   const [query, setQuery] = useState("");
 
   const [editing, setEditing] = useState<StoredSubscription | null>(null);
@@ -97,13 +93,19 @@ export default function SubscriptionsPage() {
     };
   }, []);
 
+  const needsReviewCount = useMemo(
+    () => subs.filter((s) => s.status !== "ignored" && s.needsReview).length,
+    [subs]
+  );
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return subs
       .filter((s) => (showIgnored ? true : s.status !== "ignored"))
+      .filter((s) => (needsReviewOnly ? Boolean(s.needsReview) : true))
       .filter((s) => (q ? s.name.toLowerCase().includes(q) : true))
       .sort((a, b) => b.annualCost - a.annualCost);
-  }, [subs, showIgnored, query]);
+  }, [subs, showIgnored, needsReviewOnly, query]);
 
   const grouped = useMemo(() => {
     const confirmed = filtered.filter((s) => s.status === "confirmed");
@@ -126,13 +128,7 @@ export default function SubscriptionsPage() {
     sub: { marginTop: 10, marginBottom: 0, fontSize: 14, color: MUTED, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" },
     link: { color: "rgba(20,16,12,0.76)", textDecoration: "underline", textUnderlineOffset: 3 },
 
-    controls: {
-      marginTop: 16,
-      display: "grid",
-      gridTemplateColumns: "1fr auto auto",
-      gap: 10,
-      alignItems: "center",
-    },
+    controls: { marginTop: 16, display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 10, alignItems: "center" },
     input: {
       width: "100%",
       border: `1px solid ${BORDER}`,
@@ -176,6 +172,7 @@ export default function SubscriptionsPage() {
     name: { fontSize: 14, fontWeight: 700, margin: 0, color: INK },
     meta: { marginTop: 6, fontSize: 12, color: MUTED, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" },
     badge: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid ${BORDER}`, background: "rgba(255,255,255,0.22)", color: "rgba(20,16,12,0.72)" },
+    badgeHot: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid rgba(155,28,28,0.25)`, background: "rgba(155,28,28,0.08)", color: "rgba(155,28,28,0.90)" },
     right: { textAlign: "right", minWidth: 240 },
     big: { fontSize: 14, fontWeight: 800, margin: 0, color: INK },
     small: { marginTop: 6, fontSize: 12, color: MUTED },
@@ -184,55 +181,15 @@ export default function SubscriptionsPage() {
     notice: { background: "rgba(255,255,255,0.22)", border: `1px solid ${BORDER}`, borderRadius: 18, padding: "16px 16px", fontSize: 14, color: MUTED },
     errorText: { marginTop: 8, marginBottom: 0, color: "rgba(155,28,28,0.9)" },
 
-    overlay: {
-      position: "fixed",
-      inset: 0,
-      background: "rgba(15, 12, 9, 0.24)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 18,
-    },
-    modal: {
-      width: "100%",
-      maxWidth: 560,
-      background: "rgba(246, 243, 238, 0.98)",
-      border: `1px solid ${BORDER}`,
-      borderRadius: 22,
-      boxShadow: "0 18px 60px rgba(20,16,12,0.18)",
-      overflow: "hidden",
-    },
-    modalHead: {
-      padding: "14px 16px",
-      borderBottom: `1px solid ${BORDER}`,
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      gap: 12,
-    },
+    overlay: { position: "fixed", inset: 0, background: "rgba(15, 12, 9, 0.24)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18 },
+    modal: { width: "100%", maxWidth: 560, background: "rgba(246, 243, 238, 0.98)", border: `1px solid ${BORDER}`, borderRadius: 22, boxShadow: "0 18px 60px rgba(20,16,12,0.18)", overflow: "hidden" },
+    modalHead: { padding: "14px 16px", borderBottom: `1px solid ${BORDER}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 },
     modalTitle: { margin: 0, fontSize: 14, fontWeight: 800 },
     modalBody: { padding: 16, display: "grid", gap: 12 },
     field: { display: "grid", gap: 6 },
     label: { fontSize: 12, color: MUTED, letterSpacing: "0.08em", textTransform: "uppercase" },
-    select: {
-      width: "100%",
-      border: `1px solid ${BORDER}`,
-      borderRadius: 14,
-      padding: "10px 12px",
-      background: "rgba(255,255,255,0.35)",
-      outline: "none",
-      fontSize: 14,
-      color: INK,
-      fontFamily: 'ui-serif, Georgia, "Times New Roman", Times, serif',
-    },
-    footer: {
-      padding: 16,
-      borderTop: `1px solid ${BORDER}`,
-      display: "flex",
-      justifyContent: "flex-end",
-      gap: 10,
-      flexWrap: "wrap",
-    },
+    select: { width: "100%", border: `1px solid ${BORDER}`, borderRadius: 14, padding: "10px 12px", background: "rgba(255,255,255,0.35)", outline: "none", fontSize: 14, color: INK, fontFamily: 'ui-serif, Georgia, "Times New Roman", Times, serif' },
+    footer: { padding: 16, borderTop: `1px solid ${BORDER}`, display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" },
   };
 
   const openEdit = (s: StoredSubscription) => {
@@ -255,7 +212,6 @@ export default function SubscriptionsPage() {
     if (!editing) return;
 
     const nextPatch: any = {};
-
     if (typeof draft.name === "string") nextPatch.name = draft.name.trim();
     if (typeof draft.amount === "number") nextPatch.amount = Number(draft.amount);
     if (draft.cadence === "monthly" || draft.cadence === "yearly") nextPatch.cadence = draft.cadence;
@@ -266,13 +222,44 @@ export default function SubscriptionsPage() {
     closeEdit();
   };
 
+  const Row = ({ s }: { s: StoredSubscription }) => (
+    <li style={styles.row}>
+      <div>
+        <p style={styles.name}>{s.name}</p>
+        <div style={styles.meta}>
+          <span>{currency(s.amount)} / {s.cadence}</span>
+          {s.category ? <span style={styles.badge}>{s.category}</span> : <span style={styles.badgeHot}>Uncategorized</span>}
+          {s.needsReview ? <span style={styles.badgeHot}>Needs review</span> : null}
+          {s.confidence ? <span style={styles.badge}>{s.confidence}</span> : null}
+          {typeof s.occurrences === "number" ? <span style={styles.badge}>{s.occurrences}×</span> : null}
+        </div>
+      </div>
+      <div style={styles.right}>
+        <p style={styles.big}>{currency(s.annualCost)}</p>
+        <div style={styles.small}>per year</div>
+        <div style={styles.actions}>
+          {s.status !== "confirmed" ? (
+            <button style={styles.btn} onClick={() => patchSub(s.id, { status: "confirmed" })}>Confirm</button>
+          ) : null}
+          {s.status !== "ignored" ? (
+            <button style={styles.btnGhost} onClick={() => patchSub(s.id, { status: "ignored" })}>Ignore</button>
+          ) : (
+            <button style={styles.btn} onClick={() => patchSub(s.id, { status: "suggested" })}>Restore</button>
+          )}
+          <button style={styles.btnGhost} onClick={() => openEdit(s)}>Edit</button>
+        </div>
+      </div>
+    </li>
+  );
+
   return (
     <main style={styles.page}>
       <div style={styles.wrap}>
         <header style={styles.header}>
           <h1 style={styles.h1}>Subscriptions</h1>
           <p style={styles.sub}>
-            <span style={{ opacity: 0.85 }}>Confirm what’s real. Ignore what’s not.</span>
+            <span style={{ opacity: 0.85 }}>Needs review:</span>
+            <span style={{ color: INK, fontWeight: 800 }}>{needsReviewCount}</span>
             <a href="/dashboard" style={styles.link}>Back to dashboard</a>
           </p>
 
@@ -283,6 +270,12 @@ export default function SubscriptionsPage() {
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search subscriptions…"
             />
+            <button
+              style={needsReviewOnly ? styles.btn : styles.btnGhost}
+              onClick={() => setNeedsReviewOnly((v) => !v)}
+            >
+              {needsReviewOnly ? "Needs review only" : "All items"}
+            </button>
             <button
               style={showIgnored ? styles.btn : styles.btnGhost}
               onClick={() => setShowIgnored((v) => !v)}
@@ -326,31 +319,9 @@ export default function SubscriptionsPage() {
                   {grouped.confirmed.map((s, idx) => (
                     <li
                       key={s.id}
-                      style={{
-                        ...styles.row,
-                        borderBottom: idx === grouped.confirmed.length - 1 ? "none" : `1px solid ${BORDER}`,
-                      }}
+                      style={{ borderBottom: idx === grouped.confirmed.length - 1 ? "none" : `1px solid ${BORDER}` }}
                     >
-                      <div>
-                        <p style={styles.name}>{s.name}</p>
-                        <div style={styles.meta}>
-                          <span>{currency(s.amount)} / {s.cadence}</span>
-                          {s.category ? <span style={styles.badge}>{s.category}</span> : null}
-                          {typeof s.occurrences === "number" ? <span style={styles.badge}>{s.occurrences}×</span> : null}
-                        </div>
-                      </div>
-                      <div style={styles.right}>
-                        <p style={styles.big}>{currency(s.annualCost)}</p>
-                        <div style={styles.small}>per year</div>
-                        <div style={styles.actions}>
-                          <button style={styles.btnGhost} onClick={() => patchSub(s.id, { status: "ignored" })}>
-                            Ignore
-                          </button>
-                          <button style={styles.btn} onClick={() => openEdit(s)}>
-                            Edit
-                          </button>
-                        </div>
-                      </div>
+                      <Row s={s} />
                     </li>
                   ))}
                 </ul>
@@ -369,33 +340,9 @@ export default function SubscriptionsPage() {
                   {grouped.suggested.map((s, idx) => (
                     <li
                       key={s.id}
-                      style={{
-                        ...styles.row,
-                        borderBottom: idx === grouped.suggested.length - 1 ? "none" : `1px solid ${BORDER}`,
-                      }}
+                      style={{ borderBottom: idx === grouped.suggested.length - 1 ? "none" : `1px solid ${BORDER}` }}
                     >
-                      <div>
-                        <p style={styles.name}>{s.name}</p>
-                        <div style={styles.meta}>
-                          <span>{currency(s.amount)} / {s.cadence}</span>
-                          {typeof s.occurrences === "number" ? <span style={styles.badge}>{s.occurrences}×</span> : null}
-                        </div>
-                      </div>
-                      <div style={styles.right}>
-                        <p style={styles.big}>{currency(s.annualCost)}</p>
-                        <div style={styles.small}>per year</div>
-                        <div style={styles.actions}>
-                          <button style={styles.btn} onClick={() => patchSub(s.id, { status: "confirmed" })}>
-                            Confirm
-                          </button>
-                          <button style={styles.btnGhost} onClick={() => patchSub(s.id, { status: "ignored" })}>
-                            Ignore
-                          </button>
-                          <button style={styles.btnGhost} onClick={() => openEdit(s)}>
-                            Edit
-                          </button>
-                        </div>
-                      </div>
+                      <Row s={s} />
                     </li>
                   ))}
                 </ul>
@@ -408,7 +355,6 @@ export default function SubscriptionsPage() {
                   <p style={styles.panelTitle}>Ignored</p>
                   <p style={styles.panelNote}>{grouped.ignored.length}</p>
                 </div>
-
                 {grouped.ignored.length === 0 ? (
                   <div style={{ padding: "16px", color: MUTED }}>No ignored items.</div>
                 ) : (
@@ -416,30 +362,9 @@ export default function SubscriptionsPage() {
                     {grouped.ignored.map((s, idx) => (
                       <li
                         key={s.id}
-                        style={{
-                          ...styles.row,
-                          borderBottom: idx === grouped.ignored.length - 1 ? "none" : `1px solid ${BORDER}`,
-                        }}
+                        style={{ borderBottom: idx === grouped.ignored.length - 1 ? "none" : `1px solid ${BORDER}` }}
                       >
-                        <div>
-                          <p style={styles.name}>{s.name}</p>
-                          <div style={styles.meta}>
-                            <span>{currency(s.amount)} / {s.cadence}</span>
-                            {s.category ? <span style={styles.badge}>{s.category}</span> : null}
-                          </div>
-                        </div>
-                        <div style={styles.right}>
-                          <p style={styles.big}>{currency(s.annualCost)}</p>
-                          <div style={styles.small}>per year</div>
-                          <div style={styles.actions}>
-                            <button style={styles.btn} onClick={() => patchSub(s.id, { status: "suggested" })}>
-                              Restore
-                            </button>
-                            <button style={styles.btnGhost} onClick={() => openEdit(s)}>
-                              Edit
-                            </button>
-                          </div>
-                        </div>
+                        <Row s={s} />
                       </li>
                     ))}
                   </ul>
@@ -512,9 +437,10 @@ export default function SubscriptionsPage() {
                   value={String(draft.category ?? "")}
                   onChange={(e) => setDraft((d) => ({ ...d, category: e.target.value }))}
                 >
+                  <option value="">—</option>
                   {CATEGORIES.map((c) => (
                     <option key={c} value={c}>
-                      {c === "" ? "—" : c}
+                      {c}
                     </option>
                   ))}
                 </select>

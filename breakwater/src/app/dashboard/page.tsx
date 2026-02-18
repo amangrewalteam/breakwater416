@@ -2,6 +2,9 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { detectSubscriptions, Transaction } from "@/lib/subscriptionDetector";
+import { applySubscriptionRules, normalizeMerchantName } from "@/lib/subscriptionRules";
+
+type Confidence = "high" | "med" | "low";
 
 type StoredSubscription = {
   id: string;
@@ -14,6 +17,11 @@ type StoredSubscription = {
   occurrences?: number;
   status: "suggested" | "confirmed" | "ignored";
   category?: string;
+
+  confidence?: Confidence;
+  needsReview?: boolean;
+  reason?: string[];
+
   updatedAt: string;
 };
 
@@ -35,10 +43,39 @@ function currency(n: number) {
   }
 }
 
-// simple stable id for MVP (good enough for Phase 2)
-function stableId(normalizedName: string, cadence: string, amount: number) {
+function stableId(normalized: string, cadence: string, amount: number) {
   const amt = Math.round(amount * 100);
-  return `${normalizedName}::${cadence}::${amt}`;
+  return `${normalized}::${cadence}::${amt}`;
+}
+
+function computeConfidence(s: {
+  occurrences?: number;
+  category?: string;
+  cadence: "monthly" | "yearly";
+}): { confidence: Confidence; needsReview: boolean; reason: string[] } {
+  const reasons: string[] = [];
+
+  const occ = typeof s.occurrences === "number" ? s.occurrences : 0;
+
+  // baseline
+  let confidence: Confidence = "low";
+
+  if (occ >= 5) confidence = "high";
+  else if (occ >= 4) confidence = "med";
+  else if (occ >= 3) confidence = "low";
+
+  if (!s.category) {
+    reasons.push("missing_category");
+    confidence = "low";
+  }
+
+  if (occ === 3) reasons.push("min_occurrences");
+  if (s.cadence === "yearly") reasons.push("yearly_cadence_review");
+
+  const needsReview = confidence !== "high" || !s.category;
+
+  if (needsReview) reasons.push("needs_review");
+  return { confidence, needsReview, reason: reasons };
 }
 
 export default function DashboardPage() {
@@ -56,23 +93,46 @@ export default function DashboardPage() {
   }
 
   async function syncDetectedToStore(detected: ReturnType<typeof detectSubscriptions>) {
-    // Convert detected → StoredSubscription suggestions
+    const now = new Date().toISOString();
+
     const suggestions: StoredSubscription[] = detected.map((d: any) => {
-      const normalized = (d.name || "").trim().toUpperCase();
+      // Phase 3.1 rules
+      const rr = applySubscriptionRules(d.name);
+      const canonical = rr.canonicalName || d.name;
+
+      const normalized = normalizeMerchantName(canonical);
       const id = stableId(normalized, d.cadence, d.amount);
+
+      // Phase 3.2 confidence
+      const conf = computeConfidence({
+        occurrences: d.occurrences,
+        category: rr.category,
+        cadence: d.cadence,
+      });
+
+      const status = rr.status ?? "suggested";
+
+      // merge rule reasons + confidence reasons
+      const reason = [
+        ...(rr.reason || []),
+        ...conf.reason,
+      ];
 
       return {
         id,
-        name: d.name,
+        name: canonical,
         normalized,
         amount: d.amount,
         cadence: d.cadence,
         annualCost: d.annualCost,
         lastSeen: d.lastSeen,
         occurrences: d.occurrences,
-        status: "suggested",
-        category: undefined,
-        updatedAt: new Date().toISOString(),
+        status,
+        category: rr.category,
+        confidence: conf.confidence,
+        needsReview: conf.needsReview,
+        reason: reason.length ? Array.from(new Set(reason)) : undefined,
+        updatedAt: now,
       };
     });
 
@@ -85,7 +145,6 @@ export default function DashboardPage() {
     const data = await r.json();
     if (!r.ok) throw new Error(data?.error || "Failed to sync subscriptions");
 
-    // After sync, load store state (includes preserved statuses)
     await refreshSubsFromStore();
   }
 
@@ -97,24 +156,16 @@ export default function DashboardPage() {
         setLoading(true);
         setError(null);
 
-        // 1) fetch transactions
         const tr = await fetch("/api/transactions", { cache: "no-store" });
         const txData = await tr.json();
 
-        if (!tr.ok) {
-          throw new Error(txData?.error || "Failed to fetch transactions");
-        }
-        if (!Array.isArray(txData)) {
-          throw new Error("Unexpected response from /api/transactions");
-        }
+        if (!tr.ok) throw new Error(txData?.error || "Failed to fetch transactions");
+        if (!Array.isArray(txData)) throw new Error("Unexpected response from /api/transactions");
 
         if (!alive) return;
         setTransactions(txData as Transaction[]);
 
-        // 2) detect subscriptions
         const detected = detectSubscriptions(txData as Transaction[]);
-
-        // 3) sync suggestions to store (does not overwrite confirmed/ignored)
         await syncDetectedToStore(detected);
       } catch (e: any) {
         if (!alive) return;
@@ -139,6 +190,11 @@ export default function DashboardPage() {
 
   const suggested = useMemo(
     () => subs.filter((s) => s.status === "suggested").sort((a, b) => b.annualCost - a.annualCost),
+    [subs]
+  );
+
+  const needsReviewCount = useMemo(
+    () => subs.filter((s) => s.status !== "ignored" && s.needsReview).length,
     [subs]
   );
 
@@ -175,9 +231,19 @@ export default function DashboardPage() {
     wrap: { maxWidth: 980, margin: "0 auto" },
     header: { marginBottom: 18, paddingBottom: 16, borderBottom: `1px solid ${BORDER}` },
     h1: { margin: 0, fontSize: 34, lineHeight: "40px", fontWeight: 520, letterSpacing: "-0.02em" },
-    sub: { marginTop: 10, marginBottom: 0, fontSize: 14, color: MUTED, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+    sub: {
+      marginTop: 10,
+      marginBottom: 0,
+      fontSize: 14,
+      color: MUTED,
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      flexWrap: "wrap",
+    },
     link: { color: "rgba(20,16,12,0.76)", textDecoration: "underline", textUnderlineOffset: 3 },
-    grid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, marginTop: 18, marginBottom: 16 },
+
+    grid: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12, marginTop: 18, marginBottom: 16 },
     card: { background: CARD_BG, border: `1px solid ${BORDER}`, borderRadius: 18, padding: "16px 16px", boxShadow: "0 1px 0 rgba(20,16,12,0.03)" },
     k: { fontSize: 12, textTransform: "uppercase", letterSpacing: "0.10em", color: MUTED, marginBottom: 10 },
     v: { fontSize: 22, fontWeight: 560, letterSpacing: "-0.01em" },
@@ -186,12 +252,14 @@ export default function DashboardPage() {
     panelHead: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, padding: "14px 16px", borderBottom: `1px solid ${BORDER}`, background: "rgba(255, 255, 255, 0.18)" },
     panelTitle: { fontSize: 14, fontWeight: 650, margin: 0 },
     panelNote: { fontSize: 12, color: MUTED, margin: 0, whiteSpace: "nowrap" },
+
     list: { listStyle: "none", padding: 0, margin: 0 },
     row: { padding: "14px 16px", display: "flex", justifyContent: "space-between", gap: 16, borderBottom: `1px solid ${BORDER}` },
     name: { fontSize: 14, fontWeight: 650, margin: 0, color: INK },
     meta: { marginTop: 6, fontSize: 12, color: MUTED, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
     badge: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid ${BORDER}`, background: "rgba(255,255,255,0.22)", color: "rgba(20,16,12,0.72)" },
-    right: { textAlign: "right", minWidth: 200 },
+    badgeHot: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid rgba(155,28,28,0.25)`, background: "rgba(155,28,28,0.08)", color: "rgba(155,28,28,0.90)" },
+    right: { textAlign: "right", minWidth: 220 },
     big: { fontSize: 14, fontWeight: 700, margin: 0, color: INK },
     small: { marginTop: 6, fontSize: 12, color: MUTED },
 
@@ -225,7 +293,7 @@ export default function DashboardPage() {
         <header style={styles.header}>
           <h1 style={styles.h1}>Dashboard</h1>
           <p style={styles.sub}>
-            <span style={{ opacity: 0.85 }}>Subscriptions are now persisted.</span>
+            <span style={{ opacity: 0.85 }}>Subscriptions are persisted + scored.</span>
             <a href="/subscriptions" style={styles.link}>Manage all subscriptions</a>
           </p>
 
@@ -241,6 +309,10 @@ export default function DashboardPage() {
             <div style={styles.card}>
               <div style={styles.k}>Confirmed</div>
               <div style={styles.v}>{confirmed.length}</div>
+            </div>
+            <div style={styles.card}>
+              <div style={styles.k}>Needs Review</div>
+              <div style={styles.v}>{needsReviewCount}</div>
             </div>
           </div>
         </header>
@@ -282,9 +354,8 @@ export default function DashboardPage() {
                         <div style={styles.meta}>
                           <span>{currency(s.amount)} / {s.cadence}</span>
                           {s.category ? <span style={styles.badge}>{s.category}</span> : null}
-                          {typeof s.occurrences === "number" ? (
-                            <span style={styles.badge}>{s.occurrences}×</span>
-                          ) : null}
+                          {s.needsReview ? <span style={styles.badgeHot}>Needs review</span> : null}
+                          {s.confidence ? <span style={styles.badge}>{s.confidence}</span> : null}
                         </div>
                       </div>
 
@@ -333,9 +404,9 @@ export default function DashboardPage() {
                         <p style={styles.name}>{s.name}</p>
                         <div style={styles.meta}>
                           <span>{currency(s.amount)} / {s.cadence}</span>
-                          {typeof s.occurrences === "number" ? (
-                            <span style={styles.badge}>{s.occurrences}×</span>
-                          ) : null}
+                          {s.category ? <span style={styles.badge}>{s.category}</span> : null}
+                          {s.needsReview ? <span style={styles.badgeHot}>Needs review</span> : null}
+                          {s.confidence ? <span style={styles.badge}>{s.confidence}</span> : null}
                         </div>
                       </div>
 
