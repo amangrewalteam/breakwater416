@@ -3,14 +3,14 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { readSubscriptions } from "@/lib/subscriptionStore";
+import { getSubscriptionRepo } from "@/lib/subscriptionRepo";
 
 type CashflowPoint = {
   key: string;        // YYYY-MM
   label: string;      // "Jan"
   year: number;
   month: number;      // 1-12
-  total: number;      // CAD
+  total: number;
   byCategory: Record<string, number>;
 };
 
@@ -34,14 +34,11 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const monthsParam = url.searchParams.get("months");
-    const months = Math.min(
-      24,
-      Math.max(3, Number(monthsParam || 6) || 6)
-    );
+    const months = Math.min(24, Math.max(3, Number(monthsParam || 6) || 6));
 
-    const subs = readSubscriptions().filter((s) => s.status === "confirmed");
+    const repo = getSubscriptionRepo();
+    const subs = (await repo.list()).filter((s) => s.status === "confirmed");
 
-    // Build last N months points (inclusive of current month)
     const now = new Date();
     const start = addMonths(new Date(now.getFullYear(), now.getMonth(), 1), -(months - 1));
 
@@ -58,14 +55,9 @@ export async function GET(req: Request) {
       });
     }
 
-    // Allocation model (MVP, stable):
-    // - monthly cadence => full amount each month
-    // - yearly cadence  => spread evenly across months (annual/12)
     for (const s of subs) {
       const category = s.category || "Other";
-
-      const monthlyContribution =
-        s.cadence === "monthly" ? s.amount : (s.annualCost || s.amount) / 12;
+      const monthlyContribution = s.cadence === "monthly" ? s.amount : (s.annualCost || s.amount) / 12;
 
       for (const p of points) {
         p.total += monthlyContribution;
@@ -73,7 +65,6 @@ export async function GET(req: Request) {
       }
     }
 
-    // Round to cents for clean UI
     for (const p of points) {
       p.total = Math.round(p.total * 100) / 100;
       for (const k of Object.keys(p.byCategory)) {
@@ -89,12 +80,10 @@ export async function GET(req: Request) {
       max,
       currency: "CAD",
       model: "confirmed_subscriptions_only; yearly_spread_evenly",
+      storage: (process.env.STORAGE_DRIVER || "file").toLowerCase(),
     });
   } catch (e: any) {
-    console.error("cashflow GET error:", e?.response?.data || e);
-    return NextResponse.json(
-      { error: "Failed to compute cashflow" },
-      { status: 500 }
-    );
+    console.error("cashflow GET error:", e?.message || e);
+    return NextResponse.json({ error: "Failed to compute cashflow" }, { status: 500 });
   }
 }

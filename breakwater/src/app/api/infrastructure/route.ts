@@ -3,12 +3,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { readSubscriptions } from "@/lib/subscriptionStore";
+import { getSubscriptionRepo } from "@/lib/subscriptionRepo";
 
 type Node = {
   id: string;
   label: string;
-  type: "merchant" | "category";
+  type: "merchant";
   category?: string;
   annualCost?: number;
   cadence?: "monthly" | "yearly";
@@ -26,7 +26,8 @@ type Cluster = {
 
 export async function GET() {
   try {
-    const subs = readSubscriptions()
+    const repo = getSubscriptionRepo();
+    const subs = (await repo.list())
       .filter((s) => s.status === "confirmed")
       .map((s) => ({
         id: s.id,
@@ -45,12 +46,7 @@ export async function GET() {
     for (const m of subs) {
       const cat = m.category || "Other";
       if (!byCategory.has(cat)) {
-        byCategory.set(cat, {
-          category: cat,
-          totalAnnual: 0,
-          count: 0,
-          merchants: [],
-        });
+        byCategory.set(cat, { category: cat, totalAnnual: 0, count: 0, merchants: [] });
       }
       const c = byCategory.get(cat)!;
       c.totalAnnual += m.annualCost || 0;
@@ -72,12 +68,10 @@ export async function GET() {
       totalAnnual: Math.round(totalAnnual * 100) / 100,
       clusters,
       model: "confirmed_subscriptions_only; category_clusters_v1",
+      storage: (process.env.STORAGE_DRIVER || "file").toLowerCase(),
     });
   } catch (e: any) {
-    console.error("infrastructure GET error:", e?.response?.data || e);
-    return NextResponse.json(
-      { error: "Failed to build infrastructure map" },
-      { status: 500 }
-    );
+    console.error("infrastructure GET error:", e?.message || e);
+    return NextResponse.json({ error: "Failed to build infrastructure map" }, { status: 500 });
   }
 }

@@ -3,15 +3,33 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import {
-  readSubscriptions,
-  upsertMany,
-  updateSubscription,
-  StoredSubscription,
-} from "@/lib/subscriptionStore";
+import type { StoredSubscription } from "@/lib/subscriptionStore";
+import { getSubscriptionRepo } from "@/lib/subscriptionRepo";
+
+function toErr(e: any) {
+  // Supabase errors often have: message, details, hint, code
+  return {
+    message: e?.message || String(e),
+    code: e?.code,
+    details: e?.details,
+    hint: e?.hint,
+    name: e?.name,
+  };
+}
 
 export async function GET() {
-  return NextResponse.json(readSubscriptions());
+  try {
+    const repo = getSubscriptionRepo();
+    const subs = await repo.list();
+    return NextResponse.json(subs);
+  } catch (e: any) {
+    const err = toErr(e);
+    console.error("subscriptions GET error:", err);
+    return NextResponse.json(
+      { error: "Failed to load subscriptions", debug: err },
+      { status: 500 }
+    );
+  }
 }
 
 export async function POST(req: Request) {
@@ -30,12 +48,15 @@ export async function POST(req: Request) {
       .filter((s: any) => s && typeof s.id === "string")
       .map((s: any) => s as StoredSubscription);
 
-    const merged = upsertMany(incoming);
+    const repo = getSubscriptionRepo();
+    const merged = await repo.upsertMany(incoming);
+
     return NextResponse.json({ subscriptions: merged });
   } catch (e: any) {
-    console.error("subscriptions POST error:", e?.response?.data || e);
+    const err = toErr(e);
+    console.error("subscriptions POST error:", err);
     return NextResponse.json(
-      { error: "Failed to sync subscriptions" },
+      { error: "Failed to sync subscriptions", debug: err },
       { status: 500 }
     );
   }
@@ -51,12 +72,15 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
     }
 
-    const updated = updateSubscription(id, patch);
+    const repo = getSubscriptionRepo();
+    const updated = await repo.update(id, patch);
+
     return NextResponse.json({ subscription: updated });
   } catch (e: any) {
-    console.error("subscriptions PATCH error:", e?.response?.data || e);
+    const err = toErr(e);
+    console.error("subscriptions PATCH error:", err);
     return NextResponse.json(
-      { error: "Failed to update subscription" },
+      { error: "Failed to update subscription", debug: err },
       { status: 500 }
     );
   }
