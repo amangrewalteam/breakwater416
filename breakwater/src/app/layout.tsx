@@ -1,19 +1,23 @@
-import "./globals.css";
+import React from "react";
 import { serifStack, IVORY, inkSoft } from "@/lib/style";
 
 export const metadata = {
   title: "Breakwater",
-  description: "A quiet ledger for recurring spend.",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en">
       <body
         style={{
+          margin: 0,
           background: IVORY,
-          fontFamily: serifStack,
           color: inkSoft,
+          fontFamily: serifStack,
         }}
       >
         {children}

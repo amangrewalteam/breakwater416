@@ -1,166 +1,213 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Script from "next/script";
-import { ink, inkSoft, line } from "@/lib/style";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { usePlaidLink } from "react-plaid-link";
 
 type Props = {
-  onConnected?: () => void | Promise<void>;
+  onConnected?: () => void;
+  label?: string;
 };
 
-declare global {
-  interface Window {
-    Plaid?: any;
-  }
-}
+type LinkTokenResp = { link_token: string } | { error: string };
 
-export default function PlaidConnectButton({ onConnected }: Props) {
+export default function PlaidConnectButton({
+  onConnected,
+  label = "Connect your bank",
+}: Props) {
   const [linkToken, setLinkToken] = useState<string | null>(null);
-  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [statusText, setStatusText] = useState<string>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [scriptReady, setScriptReady] = useState(false);
+  const [isFetchingToken, setIsFetchingToken] = useState(false);
 
-  async function createLinkToken() {
-    setError(null);
-    setStatus("loading");
-
-    const res = await fetch("/api/plaid/create-link-token", { method: "POST" });
-    const text = await res.text();
-
-    if (!res.ok) {
-      setStatus("error");
-      setError(text || `Failed to create link token (HTTP ${res.status})`);
-      return;
-    }
-
-    let data: any = null;
+  const fetchLinkToken = useCallback(async () => {
     try {
-      data = JSON.parse(text);
-    } catch {
-      setStatus("error");
-      setError("create-link-token returned invalid JSON.");
-      return;
+      setIsFetchingToken(true);
+      setError(null);
+      setStatusText("creating_link_token");
+
+      const res = await fetch("/api/create-link-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const raw = await res.text();
+
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(
+          `Non-JSON response (HTTP ${res.status}). First 120 chars: ${raw.slice(
+            0,
+            120
+          )}`
+        );
+      }
+
+      if (!res.ok) {
+        const msg =
+          typeof data?.error === "string"
+            ? data.error
+            : `Failed to create link token (HTTP ${res.status})`;
+        throw new Error(msg);
+      }
+
+      if (!data?.link_token) {
+        throw new Error("Missing link_token from /api/create-link-token");
+      }
+
+      setLinkToken(data.link_token);
+      setStatusText("link_token_ready");
+    } catch (e: any) {
+      setLinkToken(null);
+      setStatusText("error");
+      setError(e?.message || "Failed to create link token");
+    } finally {
+      setIsFetchingToken(false);
     }
-
-    if (!data?.link_token) {
-      setStatus("error");
-      setError(data?.error || "No link_token returned.");
-      return;
-    }
-
-    setLinkToken(data.link_token);
-    setStatus("ready");
-  }
-
-  useEffect(() => {
-    createLinkToken();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const canOpen = useMemo(() => {
-    return Boolean(linkToken) && scriptReady && status === "ready" && typeof window !== "undefined";
-  }, [linkToken, scriptReady, status]);
+  useEffect(() => {
+    fetchLinkToken();
+  }, [fetchLinkToken]);
 
-  async function exchangePublicToken(public_token: string) {
-    const res = await fetch("/api/plaid/exchange-public-token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ public_token }),
-    });
-
-    const text = await res.text();
-    if (!res.ok) {
-      let msg = text || `Token exchange failed (HTTP ${res.status})`;
+  const onSuccess = useCallback(
+    async (public_token: string) => {
       try {
-        const parsed = JSON.parse(text);
-        msg = parsed?.error || msg;
-        if (parsed?.plaid?.error_message) msg = parsed.plaid.error_message;
-      } catch {}
-      throw new Error(msg);
-    }
+        setError(null);
+        setStatusText("exchanging_public_token");
 
-    return JSON.parse(text);
-  }
+        const res = await fetch("/api/exchange-public-token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ public_token }),
+        });
 
-  function open() {
-    if (!canOpen) return;
+        const data = await res.json().catch(() => ({}));
 
-    setError(null);
-
-    const handler = window.Plaid?.create?.({
-      token: linkToken,
-      onSuccess: async (public_token: string) => {
-        try {
-          setStatus("loading");
-          await exchangePublicToken(public_token);
-          setStatus("ready");
-          await onConnected?.();
-        } catch (e: any) {
-          setStatus("error");
-          setError(e?.message || "Token exchange failed");
+        if (!res.ok) {
+          const msg =
+            typeof data?.error === "string"
+              ? data.error
+              : `Failed to exchange public token (HTTP ${res.status})`;
+          throw new Error(msg);
         }
-      },
+
+        setStatusText("connected");
+        onConnected?.();
+      } catch (e: any) {
+        setStatusText("error");
+        setError(e?.message || "Failed to exchange public token");
+      }
+    },
+    [onConnected]
+  );
+
+  const config = useMemo(
+    () => ({
+      token: linkToken ?? "",
+      onSuccess,
       onExit: (err: any) => {
         if (err) {
-          setStatus("error");
-          setError(err?.display_message || err?.error_message || "Plaid exited with an error.");
+          setStatusText("error");
+          setError(err?.display_message || err?.error_message || "Plaid exited");
+        } else {
+          setStatusText("exited");
         }
       },
-    });
+    }),
+    [linkToken, onSuccess]
+  );
 
-    handler?.open?.();
-  }
+  const { open, ready, error: plaidHookError } = usePlaidLink(config);
+
+  useEffect(() => {
+    if (plaidHookError) {
+      setStatusText("error");
+      setError(plaidHookError?.message || "Plaid failed to initialize");
+    }
+  }, [plaidHookError]);
+
+  const canOpen = ready && !!linkToken && !isFetchingToken;
+
+  // ---- Inline styles so it still looks like a button even with global resets ----
+  const buttonStyle: React.CSSProperties = {
+    // protect against global `button { all: unset; }`
+    appearance: "none",
+    WebkitAppearance: "none",
+    border: "1px solid rgba(20, 16, 12, 0.18)",
+    background: canOpen
+      ? "rgba(255, 255, 255, 0.40)"
+      : "rgba(255, 255, 255, 0.22)",
+    borderRadius: 9999,
+    padding: "14px 20px",
+    width: "100%",
+    display: "block",
+    textAlign: "center",
+    cursor: canOpen ? "pointer" : "not-allowed",
+    userSelect: "none",
+    fontSize: 14,
+    lineHeight: "20px",
+    letterSpacing: "0.01em",
+    color: "rgba(20, 16, 12, 0.78)",
+    boxShadow: "0 1px 0 rgba(20, 16, 12, 0.04)",
+    transition: "transform 120ms ease, background 160ms ease, border 160ms ease",
+  };
+
+  const buttonHoverStyle: React.CSSProperties = canOpen
+    ? {
+        background: "rgba(255, 255, 255, 0.55)",
+        border: "1px solid rgba(20, 16, 12, 0.22)",
+      }
+    : {};
+
+  const [isHover, setIsHover] = useState(false);
 
   return (
-    <>
-      <Script
-        src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"
-        strategy="afterInteractive"
-        onLoad={() => setScriptReady(true)}
-      />
-
+    <div style={{ width: "100%" }}>
       <button
-        onClick={open}
+        type="button"
         disabled={!canOpen}
-        style={{
-          padding: "12px 14px",
-          borderRadius: 999,
-          border: `1px solid ${line}`,
-          background: "rgba(255,255,255,0.25)",
-          color: ink,
-          cursor: canOpen ? "pointer" : "not-allowed",
-          opacity: canOpen ? 1 : 0.6,
-        }}
+        onClick={() => open()}
+        onMouseEnter={() => setIsHover(true)}
+        onMouseLeave={() => setIsHover(false)}
+        style={{ ...buttonStyle, ...(isHover ? buttonHoverStyle : {}) }}
       >
-        Connect your bank
+        {isFetchingToken ? "Preparing…" : label}
       </button>
 
-      <div style={{ color: inkSoft, fontSize: 12 }}>
-        linkToken: {linkToken ? "yes" : "no"} · script: {scriptReady ? "ready" : "loading"} · status:{" "}
-        {status}
+      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+        linkToken: {linkToken ? "yes" : "no"} · script:{" "}
+        {ready ? "ready" : "loading"} · status: {statusText}
       </div>
 
-      {status === "error" && (
+      {(error || plaidHookError) && (
+        <div style={{ marginTop: 10, fontSize: 14, color: "#9B1C1C" }}>
+          {error || plaidHookError?.message}
+        </div>
+      )}
+
+      {!linkToken && (
         <button
-          onClick={createLinkToken}
+          type="button"
+          onClick={fetchLinkToken}
+          disabled={isFetchingToken}
           style={{
-            marginTop: 10,
-            padding: "10px 14px",
-            borderRadius: 999,
-            border: `1px solid ${line}`,
+            marginTop: 14,
+            appearance: "none",
+            WebkitAppearance: "none",
+            border: "1px solid rgba(20, 16, 12, 0.16)",
             background: "transparent",
-            color: ink,
-            cursor: "pointer",
-            width: "fit-content",
+            borderRadius: 9999,
+            padding: "10px 16px",
+            cursor: isFetchingToken ? "not-allowed" : "pointer",
+            fontSize: 14,
+            color: "rgba(20, 16, 12, 0.72)",
           }}
         >
           Try again
         </button>
       )}
-
-      {error ? (
-        <div style={{ marginTop: 8, color: "rgba(140,40,40,0.9)" }}>{error}</div>
-      ) : null}
-    </>
+    </div>
   );
 }

@@ -2,11 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-/* quiet defaults */
 html, body {
-  height: 100%;
-}
-
-body {
-  margin: 0;
+  background: #F6F3EE;
+  color: rgba(20,16,12,0.86);
+  font-family: ui-serif, Georgia, "Times New Roman", Times, serif;
 }
