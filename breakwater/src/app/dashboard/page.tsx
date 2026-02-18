@@ -25,6 +25,23 @@ type StoredSubscription = {
   updatedAt: string;
 };
 
+type CashflowPoint = {
+  key: string;     // YYYY-MM
+  label: string;   // "Jan"
+  year: number;
+  month: number;   // 1-12
+  total: number;
+  byCategory: Record<string, number>;
+};
+
+type CashflowResponse = {
+  months: number;
+  points: CashflowPoint[];
+  max: number;
+  currency: string;
+  model: string;
+};
+
 const IVORY = "#F6F3EE";
 const INK = "rgba(20, 16, 12, 0.86)";
 const MUTED = "rgba(20, 16, 12, 0.62)";
@@ -57,9 +74,7 @@ function computeConfidence(s: {
 
   const occ = typeof s.occurrences === "number" ? s.occurrences : 0;
 
-  // baseline
   let confidence: Confidence = "low";
-
   if (occ >= 5) confidence = "high";
   else if (occ >= 4) confidence = "med";
   else if (occ >= 3) confidence = "low";
@@ -73,8 +88,8 @@ function computeConfidence(s: {
   if (s.cadence === "yearly") reasons.push("yearly_cadence_review");
 
   const needsReview = confidence !== "high" || !s.category;
-
   if (needsReview) reasons.push("needs_review");
+
   return { confidence, needsReview, reason: reasons };
 }
 
@@ -85,6 +100,10 @@ export default function DashboardPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [subs, setSubs] = useState<StoredSubscription[]>([]);
 
+  // Phase 3.3
+  const [cashflow, setCashflow] = useState<CashflowResponse | null>(null);
+  const [cashflowError, setCashflowError] = useState<string | null>(null);
+
   async function refreshSubsFromStore() {
     const r = await fetch("/api/subscriptions", { cache: "no-store" });
     const data = await r.json();
@@ -92,18 +111,29 @@ export default function DashboardPage() {
     setSubs(Array.isArray(data) ? data : data?.subscriptions ?? data);
   }
 
+  async function refreshCashflow(months = 6) {
+    try {
+      setCashflowError(null);
+      const r = await fetch(`/api/cashflow?months=${months}`, { cache: "no-store" });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data?.error || "Failed to load cashflow");
+      setCashflow(data as CashflowResponse);
+    } catch (e: any) {
+      setCashflowError(e?.message || "Failed to load cashflow");
+      setCashflow(null);
+    }
+  }
+
   async function syncDetectedToStore(detected: ReturnType<typeof detectSubscriptions>) {
     const now = new Date().toISOString();
 
     const suggestions: StoredSubscription[] = detected.map((d: any) => {
-      // Phase 3.1 rules
       const rr = applySubscriptionRules(d.name);
       const canonical = rr.canonicalName || d.name;
 
       const normalized = normalizeMerchantName(canonical);
       const id = stableId(normalized, d.cadence, d.amount);
 
-      // Phase 3.2 confidence
       const conf = computeConfidence({
         occurrences: d.occurrences,
         category: rr.category,
@@ -111,12 +141,7 @@ export default function DashboardPage() {
       });
 
       const status = rr.status ?? "suggested";
-
-      // merge rule reasons + confidence reasons
-      const reason = [
-        ...(rr.reason || []),
-        ...conf.reason,
-      ];
+      const reason = [...(rr.reason || []), ...conf.reason];
 
       return {
         id,
@@ -167,6 +192,9 @@ export default function DashboardPage() {
 
         const detected = detectSubscriptions(txData as Transaction[]);
         await syncDetectedToStore(detected);
+
+        // Phase 3.3: compute timeline from confirmed subs (stored)
+        await refreshCashflow(6);
       } catch (e: any) {
         if (!alive) return;
         setError(e?.message || "Something went wrong");
@@ -205,9 +233,7 @@ export default function DashboardPage() {
     }, 0);
   }, [confirmed]);
 
-  const annualTotal = useMemo(() => {
-    return confirmed.reduce((sum, s) => sum + s.annualCost, 0);
-  }, [confirmed]);
+  const annualTotal = useMemo(() => confirmed.reduce((sum, s) => sum + s.annualCost, 0), [confirmed]);
 
   async function patchSub(id: string, patch: any) {
     const r = await fetch("/api/subscriptions", {
@@ -217,7 +243,9 @@ export default function DashboardPage() {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data?.error || "Failed to update subscription");
+
     await refreshSubsFromStore();
+    await refreshCashflow(6); // keep timeline in sync
   }
 
   const styles: Record<string, React.CSSProperties> = {
@@ -243,8 +271,20 @@ export default function DashboardPage() {
     },
     link: { color: "rgba(20,16,12,0.76)", textDecoration: "underline", textUnderlineOffset: 3 },
 
-    grid: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12, marginTop: 18, marginBottom: 16 },
-    card: { background: CARD_BG, border: `1px solid ${BORDER}`, borderRadius: 18, padding: "16px 16px", boxShadow: "0 1px 0 rgba(20,16,12,0.03)" },
+    grid: {
+      display: "grid",
+      gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+      gap: 12,
+      marginTop: 18,
+      marginBottom: 16,
+    },
+    card: {
+      background: CARD_BG,
+      border: `1px solid ${BORDER}`,
+      borderRadius: 18,
+      padding: "16px 16px",
+      boxShadow: "0 1px 0 rgba(20,16,12,0.03)",
+    },
     k: { fontSize: 12, textTransform: "uppercase", letterSpacing: "0.10em", color: MUTED, marginBottom: 10 },
     v: { fontSize: 22, fontWeight: 560, letterSpacing: "-0.01em" },
 
@@ -270,22 +310,37 @@ export default function DashboardPage() {
     notice: { background: "rgba(255,255,255,0.22)", border: `1px solid ${BORDER}`, borderRadius: 18, padding: "16px 16px", fontSize: 14, color: MUTED },
     errorText: { marginTop: 8, marginBottom: 0, color: "rgba(155,28,28,0.9)" },
 
-    debug: { marginTop: 14, border: `1px solid ${BORDER}`, borderRadius: 18, padding: "14px 16px", background: "rgba(255, 255, 255, 0.20)" },
-    summary: { cursor: "pointer", fontWeight: 700, fontSize: 14 },
-    pre: {
-      marginTop: 10,
-      padding: 12,
-      borderRadius: 14,
-      border: `1px solid ${BORDER}`,
-      background: "rgba(255,255,255,0.24)",
-      maxHeight: 280,
-      overflow: "auto",
-      fontSize: 12,
-      color: "rgba(20,16,12,0.78)",
-      fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+    // Timeline UI
+    timelineWrap: { padding: "14px 16px" },
+    timelineGrid: {
+      display: "grid",
+      gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
+      gap: 10,
+      alignItems: "end",
+      marginTop: 12,
     },
+    barCol: {
+      display: "grid",
+      gap: 8,
+      alignItems: "end",
+      justifyItems: "center",
+      padding: "6px 0",
+    },
+    bar: {
+      width: "100%",
+      borderRadius: 12,
+      border: `1px solid ${BORDER}`,
+      background: "rgba(20,16,12,0.08)",
+      boxShadow: "0 1px 0 rgba(20,16,12,0.02)",
+      minHeight: 10,
+      transition: "height 220ms ease",
+    },
+    barCap: { fontSize: 12, color: MUTED, textAlign: "center" },
+    barValue: { fontSize: 12, color: "rgba(20,16,12,0.76)", textAlign: "center" },
   };
+
+  const timeline = cashflow?.points ?? [];
+  const max = cashflow?.max ?? 0;
 
   return (
     <main style={styles.page}>
@@ -323,12 +378,57 @@ export default function DashboardPage() {
           <div style={styles.notice}>
             <div style={{ fontWeight: 800, color: INK }}>Couldn’t load</div>
             <p style={styles.errorText}>{error}</p>
-            <button style={styles.btn} onClick={() => window.location.reload()}>
-              Retry
-            </button>
+            <button style={styles.btn} onClick={() => window.location.reload()}>Retry</button>
           </div>
         ) : (
           <>
+            {/* Phase 3.3 Timeline */}
+            <section style={styles.panel}>
+              <div style={styles.panelHead}>
+                <p style={styles.panelTitle}>Monthly cashflow</p>
+                <p style={styles.panelNote}>
+                  last 6 months · confirmed only
+                </p>
+              </div>
+
+              <div style={styles.timelineWrap}>
+                {cashflowError ? (
+                  <div style={{ color: "rgba(155,28,28,0.9)", fontSize: 13 }}>
+                    {cashflowError}
+                  </div>
+                ) : !cashflow ? (
+                  <div style={{ color: MUTED, fontSize: 13 }}>
+                    Preparing timeline…
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+                      <div style={{ fontSize: 13, color: MUTED }}>
+                        Model: yearly subscriptions spread evenly (annual/12).
+                      </div>
+                      <button style={styles.btnGhost} onClick={() => refreshCashflow(12)}>
+                        Show 12 months
+                      </button>
+                    </div>
+
+                    <div style={styles.timelineGrid}>
+                      {timeline.slice(-6).map((p) => {
+                        const h = max > 0 ? Math.max(10, Math.round((p.total / max) * 120)) : 10;
+                        return (
+                          <div key={p.key} style={styles.barCol} title={p.key}>
+                            <div style={{ ...styles.bar, height: h }} />
+                            <div style={styles.barValue}>{currency(p.total)}</div>
+                            <div style={styles.barCap}>{p.label}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            </section>
+
+            {/* Confirmed */}
             <section style={styles.panel}>
               <div style={styles.panelHead}>
                 <p style={styles.panelTitle}>Confirmed</p>
@@ -363,10 +463,7 @@ export default function DashboardPage() {
                         <p style={styles.big}>{currency(s.annualCost)}</p>
                         <div style={styles.small}>per year</div>
                         <div style={styles.actions}>
-                          <button
-                            style={styles.btnGhost}
-                            onClick={() => patchSub(s.id, { status: "ignored" })}
-                          >
+                          <button style={styles.btnGhost} onClick={() => patchSub(s.id, { status: "ignored" })}>
                             Ignore
                           </button>
                           <a href="/subscriptions" style={{ ...styles.btn, textDecoration: "none", display: "inline-block" }}>
@@ -380,6 +477,7 @@ export default function DashboardPage() {
               )}
             </section>
 
+            {/* Suggested */}
             <section style={styles.panel}>
               <div style={styles.panelHead}>
                 <p style={styles.panelTitle}>Suggested</p>
@@ -415,16 +513,10 @@ export default function DashboardPage() {
                         <div style={styles.small}>per year</div>
 
                         <div style={styles.actions}>
-                          <button
-                            style={styles.btn}
-                            onClick={() => patchSub(s.id, { status: "confirmed" })}
-                          >
+                          <button style={styles.btn} onClick={() => patchSub(s.id, { status: "confirmed" })}>
                             Confirm
                           </button>
-                          <button
-                            style={styles.btnGhost}
-                            onClick={() => patchSub(s.id, { status: "ignored" })}
-                          >
+                          <button style={styles.btnGhost} onClick={() => patchSub(s.id, { status: "ignored" })}>
                             Ignore
                           </button>
                           <a href="/subscriptions" style={{ ...styles.btnGhost, textDecoration: "none", display: "inline-block" }}>
@@ -438,8 +530,9 @@ export default function DashboardPage() {
               )}
             </section>
 
-            <details style={styles.debug}>
-              <summary style={styles.summary}>Debug</summary>
+            {/* Debug */}
+            <details style={{ marginTop: 14, border: `1px solid ${BORDER}`, borderRadius: 18, padding: "14px 16px", background: "rgba(255, 255, 255, 0.20)" }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 14 }}>Debug</summary>
               <div style={{ marginTop: 12 }}>
                 <div style={{ fontSize: 12, color: MUTED, letterSpacing: "0.08em", textTransform: "uppercase" }}>
                   Transactions loaded
@@ -451,7 +544,21 @@ export default function DashboardPage() {
                 <div style={{ marginTop: 14, fontSize: 12, color: MUTED, letterSpacing: "0.08em", textTransform: "uppercase" }}>
                   First few transactions
                 </div>
-                <pre style={styles.pre}>
+                <pre
+                  style={{
+                    marginTop: 10,
+                    padding: 12,
+                    borderRadius: 14,
+                    border: `1px solid ${BORDER}`,
+                    background: "rgba(255,255,255,0.24)",
+                    maxHeight: 280,
+                    overflow: "auto",
+                    fontSize: 12,
+                    color: "rgba(20,16,12,0.78)",
+                    fontFamily:
+                      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                  }}
+                >
                   {JSON.stringify(transactions.slice(0, 10), null, 2)}
                 </pre>
               </div>
