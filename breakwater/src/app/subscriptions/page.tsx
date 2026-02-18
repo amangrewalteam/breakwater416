@@ -1,459 +1,415 @@
+// src/app/subscriptions/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
-import { CATEGORIES } from "@/lib/subscriptionRules";
-
-type Confidence = "high" | "med" | "low";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import Shell from "@/components/Shell";
+import { ink, inkSoft, line } from "@/lib/style";
 
 type StoredSubscription = {
   id: string;
   name: string;
-  normalized: string;
+  normalized?: string;
   amount: number;
   cadence: "monthly" | "yearly";
   annualCost: number;
   lastSeen?: string;
   occurrences?: number;
-  status: "suggested" | "confirmed" | "ignored";
+  status: "confirmed" | "ignored" | "needs_review";
   category?: string;
-
-  confidence?: Confidence;
+  confidence?: "high" | "med" | "low";
   needsReview?: boolean;
-  reason?: string[];
-
-  updatedAt: string;
+  reason?: string;
+  updatedAt?: string;
 };
 
-const IVORY = "#F6F3EE";
-const INK = "rgba(20, 16, 12, 0.86)";
-const MUTED = "rgba(20, 16, 12, 0.62)";
-const BORDER = "rgba(20, 16, 12, 0.14)";
+type FilterMode = "all" | "review" | "confirmed" | "ignored";
 
-function currency(n: number) {
-  try {
-    return new Intl.NumberFormat("en-CA", {
-      style: "currency",
-      currency: "CAD",
-      maximumFractionDigits: 2,
-    }).format(n);
-  } catch {
-    return `$${n.toFixed(2)}`;
+function fmtMoney(n: number) {
+  return n.toLocaleString("en-CA", { style: "currency", currency: "CAD" });
+}
+
+function cadenceLabel(s: StoredSubscription) {
+  if (s.cadence === "monthly") return `${fmtMoney(s.amount)} / monthly`;
+  return `${fmtMoney(s.amount)} / yearly`;
+}
+
+function annualLabel(s: StoredSubscription) {
+  return `${fmtMoney(s.annualCost)} per year`;
+}
+
+function statusLabel(s: StoredSubscription) {
+  if (s.status === "confirmed") return "Confirmed";
+  if (s.status === "ignored") return "Ignored";
+  return "Needs review";
+}
+
+function statusPillStyle(s: StoredSubscription) {
+  const base = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: `1px solid ${line}`,
+    fontSize: 12,
+    color: ink,
+    background: "rgba(255,255,255,0.28)",
+  } as const;
+
+  if (s.status === "needs_review") {
+    return { ...base, background: "rgba(140,40,40,0.08)", border: "1px solid rgba(140,40,40,0.22)" };
   }
+  if (s.status === "ignored") {
+    return { ...base, opacity: 0.7 };
+  }
+  return base;
 }
 
 export default function SubscriptionsPage() {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
 
   const [subs, setSubs] = useState<StoredSubscription[]>([]);
-  const [showIgnored, setShowIgnored] = useState(false);
-  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
-  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  const [editing, setEditing] = useState<StoredSubscription | null>(null);
-  const [draft, setDraft] = useState<Partial<StoredSubscription>>({});
+  const [q, setQ] = useState("");
+  const [filter, setFilter] = useState<FilterMode>("all");
+  const [hideIgnored, setHideIgnored] = useState(true);
 
-  async function load() {
-    const r = await fetch("/api/subscriptions", { cache: "no-store" });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data?.error || "Failed to load subscriptions");
-    setSubs(Array.isArray(data) ? data : data?.subscriptions ?? data);
-  }
-
-  async function patchSub(id: string, patch: any) {
-    const r = await fetch("/api/subscriptions", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, patch }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data?.error || "Failed to update subscription");
-    await load();
-  }
-
-  useEffect(() => {
-    let alive = true;
-
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        await load();
-      } catch (e: any) {
-        if (!alive) return;
-        setError(e?.message || "Something went wrong");
-      } finally {
-        if (!alive) return;
-        setLoading(false);
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  const needsReviewCount = useMemo(
-    () => subs.filter((s) => s.status !== "ignored" && s.needsReview).length,
-    [subs]
-  );
+  const needsReviewCount = useMemo(() => {
+    return subs.filter((s) => s.status === "needs_review" || s.needsReview === true).length;
+  }, [subs]);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const query = q.trim().toLowerCase();
+
     return subs
-      .filter((s) => (showIgnored ? true : s.status !== "ignored"))
-      .filter((s) => (needsReviewOnly ? Boolean(s.needsReview) : true))
-      .filter((s) => (q ? s.name.toLowerCase().includes(q) : true))
-      .sort((a, b) => b.annualCost - a.annualCost);
-  }, [subs, showIgnored, needsReviewOnly, query]);
+      .filter((s) => {
+        if (hideIgnored && s.status === "ignored") return false;
 
-  const grouped = useMemo(() => {
-    const confirmed = filtered.filter((s) => s.status === "confirmed");
-    const suggested = filtered.filter((s) => s.status === "suggested");
-    const ignored = subs.filter((s) => s.status === "ignored").sort((a, b) => b.annualCost - a.annualCost);
-    return { confirmed, suggested, ignored };
-  }, [filtered, subs]);
+        if (filter === "review") return s.status === "needs_review" || s.needsReview === true;
+        if (filter === "confirmed") return s.status === "confirmed";
+        if (filter === "ignored") return s.status === "ignored";
 
-  const styles: Record<string, React.CSSProperties> = {
-    page: {
-      minHeight: "100vh",
-      background: IVORY,
-      color: INK,
-      padding: "40px 24px",
-      fontFamily: 'ui-serif, Georgia, "Times New Roman", Times, serif',
-    },
-    wrap: { maxWidth: 980, margin: "0 auto" },
-    header: { marginBottom: 18, paddingBottom: 16, borderBottom: `1px solid ${BORDER}` },
-    h1: { margin: 0, fontSize: 34, lineHeight: "40px", fontWeight: 520, letterSpacing: "-0.02em" },
-    sub: { marginTop: 10, marginBottom: 0, fontSize: 14, color: MUTED, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" },
-    link: { color: "rgba(20,16,12,0.76)", textDecoration: "underline", textUnderlineOffset: 3 },
+        return true;
+      })
+      .filter((s) => {
+        if (!query) return true;
+        return (
+          (s.name || "").toLowerCase().includes(query) ||
+          (s.normalized || "").toLowerCase().includes(query) ||
+          (s.category || "").toLowerCase().includes(query)
+        );
+      })
+      .sort((a, b) => (b.annualCost || 0) - (a.annualCost || 0));
+  }, [subs, q, filter, hideIgnored]);
 
-    controls: { marginTop: 16, display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 10, alignItems: "center" },
-    input: {
-      width: "100%",
-      border: `1px solid ${BORDER}`,
-      borderRadius: 9999,
-      padding: "10px 14px",
-      background: "rgba(255,255,255,0.30)",
-      outline: "none",
-      fontSize: 14,
-      color: INK,
-      fontFamily: 'ui-serif, Georgia, "Times New Roman", Times, serif',
-    },
-    btn: {
-      border: `1px solid ${BORDER}`,
-      background: "rgba(255,255,255,0.26)",
-      padding: "10px 14px",
-      borderRadius: 9999,
+  const goLogin = useCallback(() => {
+    router.replace(`/login?next=${encodeURIComponent("/subscriptions")}`);
+  }, [router]);
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      setErr(null);
+
+      const r = await fetch("/api/subscriptions", { cache: "no-store" });
+
+      // If auth is missing/expired, do NOT throw a runtime error page — route to login.
+      if (r.status === 401 || r.status === 403) {
+        goLogin();
+        return;
+      }
+
+      const data = await r.json().catch(() => null);
+
+      if (!r.ok) {
+        const msg =
+          (data && (data.error || data.message)) || "Failed to load subscriptions";
+        throw new Error(msg);
+      }
+
+      // API sometimes returns array, sometimes { subscriptions: [...] }
+      const list = Array.isArray(data) ? data : data?.subscriptions ?? data;
+      setSubs(Array.isArray(list) ? list : []);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load subscriptions");
+    } finally {
+      setLoading(false);
+    }
+  }, [goLogin]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function patch(id: string, patchObj: Partial<StoredSubscription>) {
+    try {
+      setErr(null);
+
+      const r = await fetch("/api/subscriptions", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, patch: patchObj }),
+      });
+
+      if (r.status === 401 || r.status === 403) {
+        goLogin();
+        return;
+      }
+
+      const data = await r.json().catch(() => null);
+
+      if (!r.ok) {
+        throw new Error((data && (data.error || data.message)) || "Update failed");
+      }
+
+      const updated: StoredSubscription | null = data?.subscription ?? null;
+      if (!updated) return;
+
+      setSubs((prev) => prev.map((s) => (s.id === id ? updated : s)));
+    } catch (e: any) {
+      setErr(e?.message || "Update failed");
+    }
+  }
+
+  const pill = (active: boolean) =>
+    ({
+      padding: "8px 12px",
+      borderRadius: 999,
+      border: `1px solid ${line}`,
+      background: active ? "rgba(20,16,12,0.06)" : "rgba(255,255,255,0.18)",
+      color: ink,
       cursor: "pointer",
       fontSize: 13,
-      color: INK,
-      fontFamily: 'ui-serif, Georgia, "Times New Roman", Times, serif',
       whiteSpace: "nowrap",
-    },
-    btnGhost: {
-      border: `1px solid ${BORDER}`,
-      background: "transparent",
-      padding: "10px 14px",
-      borderRadius: 9999,
-      cursor: "pointer",
-      fontSize: 13,
-      color: "rgba(20,16,12,0.74)",
-      fontFamily: 'ui-serif, Georgia, "Times New Roman", Times, serif',
-      whiteSpace: "nowrap",
-    },
-
-    panel: { background: "rgba(255, 255, 255, 0.22)", border: `1px solid ${BORDER}`, borderRadius: 18, overflow: "hidden", marginTop: 14 },
-    panelHead: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, padding: "14px 16px", borderBottom: `1px solid ${BORDER}`, background: "rgba(255, 255, 255, 0.18)" },
-    panelTitle: { fontSize: 14, fontWeight: 750, margin: 0 },
-    panelNote: { fontSize: 12, color: MUTED, margin: 0, whiteSpace: "nowrap" },
-    list: { listStyle: "none", padding: 0, margin: 0 },
-    row: { padding: "14px 16px", display: "flex", justifyContent: "space-between", gap: 16, borderBottom: `1px solid ${BORDER}` },
-    name: { fontSize: 14, fontWeight: 700, margin: 0, color: INK },
-    meta: { marginTop: 6, fontSize: 12, color: MUTED, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" },
-    badge: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid ${BORDER}`, background: "rgba(255,255,255,0.22)", color: "rgba(20,16,12,0.72)" },
-    badgeHot: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid rgba(155,28,28,0.25)`, background: "rgba(155,28,28,0.08)", color: "rgba(155,28,28,0.90)" },
-    right: { textAlign: "right", minWidth: 240 },
-    big: { fontSize: 14, fontWeight: 800, margin: 0, color: INK },
-    small: { marginTop: 6, fontSize: 12, color: MUTED },
-    actions: { display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10, flexWrap: "wrap" },
-
-    notice: { background: "rgba(255,255,255,0.22)", border: `1px solid ${BORDER}`, borderRadius: 18, padding: "16px 16px", fontSize: 14, color: MUTED },
-    errorText: { marginTop: 8, marginBottom: 0, color: "rgba(155,28,28,0.9)" },
-
-    overlay: { position: "fixed", inset: 0, background: "rgba(15, 12, 9, 0.24)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18 },
-    modal: { width: "100%", maxWidth: 560, background: "rgba(246, 243, 238, 0.98)", border: `1px solid ${BORDER}`, borderRadius: 22, boxShadow: "0 18px 60px rgba(20,16,12,0.18)", overflow: "hidden" },
-    modalHead: { padding: "14px 16px", borderBottom: `1px solid ${BORDER}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 },
-    modalTitle: { margin: 0, fontSize: 14, fontWeight: 800 },
-    modalBody: { padding: 16, display: "grid", gap: 12 },
-    field: { display: "grid", gap: 6 },
-    label: { fontSize: 12, color: MUTED, letterSpacing: "0.08em", textTransform: "uppercase" },
-    select: { width: "100%", border: `1px solid ${BORDER}`, borderRadius: 14, padding: "10px 12px", background: "rgba(255,255,255,0.35)", outline: "none", fontSize: 14, color: INK, fontFamily: 'ui-serif, Georgia, "Times New Roman", Times, serif' },
-    footer: { padding: 16, borderTop: `1px solid ${BORDER}`, display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" },
-  };
-
-  const openEdit = (s: StoredSubscription) => {
-    setEditing(s);
-    setDraft({
-      name: s.name,
-      amount: s.amount,
-      cadence: s.cadence,
-      category: s.category || "",
-      status: s.status,
-    });
-  };
-
-  const closeEdit = () => {
-    setEditing(null);
-    setDraft({});
-  };
-
-  const saveEdit = async () => {
-    if (!editing) return;
-
-    const nextPatch: any = {};
-    if (typeof draft.name === "string") nextPatch.name = draft.name.trim();
-    if (typeof draft.amount === "number") nextPatch.amount = Number(draft.amount);
-    if (draft.cadence === "monthly" || draft.cadence === "yearly") nextPatch.cadence = draft.cadence;
-    if (typeof draft.category === "string") nextPatch.category = draft.category || undefined;
-    if (draft.status === "suggested" || draft.status === "confirmed" || draft.status === "ignored") nextPatch.status = draft.status;
-
-    await patchSub(editing.id, nextPatch);
-    closeEdit();
-  };
-
-  const Row = ({ s }: { s: StoredSubscription }) => (
-    <li style={styles.row}>
-      <div>
-        <p style={styles.name}>{s.name}</p>
-        <div style={styles.meta}>
-          <span>{currency(s.amount)} / {s.cadence}</span>
-          {s.category ? <span style={styles.badge}>{s.category}</span> : <span style={styles.badgeHot}>Uncategorized</span>}
-          {s.needsReview ? <span style={styles.badgeHot}>Needs review</span> : null}
-          {s.confidence ? <span style={styles.badge}>{s.confidence}</span> : null}
-          {typeof s.occurrences === "number" ? <span style={styles.badge}>{s.occurrences}×</span> : null}
-        </div>
-      </div>
-      <div style={styles.right}>
-        <p style={styles.big}>{currency(s.annualCost)}</p>
-        <div style={styles.small}>per year</div>
-        <div style={styles.actions}>
-          {s.status !== "confirmed" ? (
-            <button style={styles.btn} onClick={() => patchSub(s.id, { status: "confirmed" })}>Confirm</button>
-          ) : null}
-          {s.status !== "ignored" ? (
-            <button style={styles.btnGhost} onClick={() => patchSub(s.id, { status: "ignored" })}>Ignore</button>
-          ) : (
-            <button style={styles.btn} onClick={() => patchSub(s.id, { status: "suggested" })}>Restore</button>
-          )}
-          <button style={styles.btnGhost} onClick={() => openEdit(s)}>Edit</button>
-        </div>
-      </div>
-    </li>
-  );
+    } as const);
 
   return (
-    <main style={styles.page}>
-      <div style={styles.wrap}>
-        <header style={styles.header}>
-          <h1 style={styles.h1}>Subscriptions</h1>
-          <p style={styles.sub}>
-            <span style={{ opacity: 0.85 }}>Needs review:</span>
-            <span style={{ color: INK, fontWeight: 800 }}>{needsReviewCount}</span>
-            <a href="/dashboard" style={styles.link}>Back to dashboard</a>
-          </p>
+    <Shell
+      title="Subscriptions"
+      subtitle={
+        <span style={{ color: inkSoft }}>
+          Needs review: <b style={{ color: ink }}>{needsReviewCount}</b>{" "}
+          <span style={{ padding: "0 10px" }}>·</span>
+          <Link href="/dashboard" style={{ color: ink, textDecoration: "underline" }}>
+            Back to dashboard
+          </Link>
+        </span>
+      }
+    >
+      <div style={{ display: "grid", gap: 14 }}>
+        {/* Controls */}
+        <div
+          style={{
+            display: "grid",
+            gap: 10,
+            gridTemplateColumns: "1fr",
+          }}
+        >
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search subscriptions…"
+            style={{
+              padding: "12px 14px",
+              borderRadius: 999,
+              border: `1px solid ${line}`,
+              background: "rgba(255,255,255,0.35)",
+              color: ink,
+              outline: "none",
+              width: "100%",
+            }}
+          />
 
-          <div style={styles.controls}>
-            <input
-              style={styles.input}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search subscriptions…"
-            />
-            <button
-              style={needsReviewOnly ? styles.btn : styles.btnGhost}
-              onClick={() => setNeedsReviewOnly((v) => !v)}
-            >
-              {needsReviewOnly ? "Needs review only" : "All items"}
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "flex-end",
+            }}
+          >
+            <button style={pill(filter === "all")} onClick={() => setFilter("all")}>
+              All items
+            </button>
+            <button style={pill(hideIgnored)} onClick={() => setHideIgnored((v) => !v)}>
+              {hideIgnored ? "Hide ignored" : "Show ignored"}
             </button>
             <button
-              style={showIgnored ? styles.btn : styles.btnGhost}
-              onClick={() => setShowIgnored((v) => !v)}
-            >
-              {showIgnored ? "Showing ignored" : "Hide ignored"}
-            </button>
-            <button
-              style={styles.btn}
-              onClick={async () => {
-                try {
-                  setLoading(true);
-                  await load();
-                } finally {
-                  setLoading(false);
-                }
+              style={{
+                ...pill(false),
+                border: "1px solid rgba(20,16,12,0.28)",
+                background: "rgba(255,255,255,0.24)",
               }}
+              onClick={load}
+              disabled={loading}
             >
-              Refresh
+              {loading ? "Refreshing…" : "Refresh"}
             </button>
-          </div>
-        </header>
-
-        {loading ? (
-          <div style={styles.notice}>Loading…</div>
-        ) : error ? (
-          <div style={styles.notice}>
-            <div style={{ fontWeight: 800, color: INK }}>Couldn’t load</div>
-            <p style={styles.errorText}>{error}</p>
-          </div>
-        ) : (
-          <>
-            <section style={styles.panel}>
-              <div style={styles.panelHead}>
-                <p style={styles.panelTitle}>Confirmed</p>
-                <p style={styles.panelNote}>{grouped.confirmed.length}</p>
-              </div>
-              {grouped.confirmed.length === 0 ? (
-                <div style={{ padding: "16px", color: MUTED }}>None confirmed yet.</div>
-              ) : (
-                <ul style={styles.list}>
-                  {grouped.confirmed.map((s, idx) => (
-                    <li
-                      key={s.id}
-                      style={{ borderBottom: idx === grouped.confirmed.length - 1 ? "none" : `1px solid ${BORDER}` }}
-                    >
-                      <Row s={s} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section style={styles.panel}>
-              <div style={styles.panelHead}>
-                <p style={styles.panelTitle}>Suggested</p>
-                <p style={styles.panelNote}>{grouped.suggested.length}</p>
-              </div>
-              {grouped.suggested.length === 0 ? (
-                <div style={{ padding: "16px", color: MUTED }}>Nothing suggested right now.</div>
-              ) : (
-                <ul style={styles.list}>
-                  {grouped.suggested.map((s, idx) => (
-                    <li
-                      key={s.id}
-                      style={{ borderBottom: idx === grouped.suggested.length - 1 ? "none" : `1px solid ${BORDER}` }}
-                    >
-                      <Row s={s} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            {showIgnored && (
-              <section style={styles.panel}>
-                <div style={styles.panelHead}>
-                  <p style={styles.panelTitle}>Ignored</p>
-                  <p style={styles.panelNote}>{grouped.ignored.length}</p>
-                </div>
-                {grouped.ignored.length === 0 ? (
-                  <div style={{ padding: "16px", color: MUTED }}>No ignored items.</div>
-                ) : (
-                  <ul style={styles.list}>
-                    {grouped.ignored.map((s, idx) => (
-                      <li
-                        key={s.id}
-                        style={{ borderBottom: idx === grouped.ignored.length - 1 ? "none" : `1px solid ${BORDER}` }}
-                      >
-                        <Row s={s} />
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-            )}
-          </>
-        )}
-      </div>
-
-      {editing && (
-        <div style={styles.overlay} onClick={closeEdit}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalHead}>
-              <p style={styles.modalTitle}>Edit subscription</p>
-              <button style={styles.btnGhost} onClick={closeEdit}>Close</button>
-            </div>
-
-            <div style={styles.modalBody}>
-              <div style={styles.field}>
-                <div style={styles.label}>Name</div>
-                <input
-                  style={styles.input}
-                  value={String(draft.name ?? "")}
-                  onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                />
-              </div>
-
-              <div style={styles.field}>
-                <div style={styles.label}>Amount</div>
-                <input
-                  style={styles.input}
-                  inputMode="decimal"
-                  value={String(draft.amount ?? "")}
-                  onChange={(e) => setDraft((d) => ({ ...d, amount: Number(e.target.value) }))}
-                />
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <div style={styles.field}>
-                  <div style={styles.label}>Cadence</div>
-                  <select
-                    style={styles.select}
-                    value={(draft.cadence as any) ?? "monthly"}
-                    onChange={(e) => setDraft((d) => ({ ...d, cadence: e.target.value as any }))}
-                  >
-                    <option value="monthly">monthly</option>
-                    <option value="yearly">yearly</option>
-                  </select>
-                </div>
-
-                <div style={styles.field}>
-                  <div style={styles.label}>Status</div>
-                  <select
-                    style={styles.select}
-                    value={(draft.status as any) ?? "suggested"}
-                    onChange={(e) => setDraft((d) => ({ ...d, status: e.target.value as any }))}
-                  >
-                    <option value="suggested">suggested</option>
-                    <option value="confirmed">confirmed</option>
-                    <option value="ignored">ignored</option>
-                  </select>
-                </div>
-              </div>
-
-              <div style={styles.field}>
-                <div style={styles.label}>Category</div>
-                <select
-                  style={styles.select}
-                  value={String(draft.category ?? "")}
-                  onChange={(e) => setDraft((d) => ({ ...d, category: e.target.value }))}
-                >
-                  <option value="">—</option>
-                  {CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div style={styles.footer}>
-              <button style={styles.btnGhost} onClick={closeEdit}>Cancel</button>
-              <button style={styles.btn} onClick={saveEdit}>Save</button>
-            </div>
           </div>
         </div>
-      )}
-    </main>
+
+        {/* Error (calm, non-crashy) */}
+        {err ? (
+          <div
+            style={{
+              border: `1px solid rgba(140,40,40,0.22)`,
+              background: "rgba(140,40,40,0.06)",
+              borderRadius: 18,
+              padding: 16,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 6, color: ink }}>Couldn’t load</div>
+            <div style={{ color: "rgba(140,40,40,0.9)" }}>{err}</div>
+          </div>
+        ) : null}
+
+        {/* List */}
+        <div
+          style={{
+            border: `1px solid ${line}`,
+            borderRadius: 18,
+            overflow: "hidden",
+            background: "rgba(255,255,255,0.16)",
+          }}
+        >
+          <div
+            style={{
+              padding: "12px 16px",
+              borderBottom: `1px solid ${line}`,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "baseline",
+            }}
+          >
+            <div style={{ fontWeight: 700, color: ink }}>Recurring items</div>
+            <div style={{ color: inkSoft, fontSize: 13 }}>Based on transaction patterns</div>
+          </div>
+
+          {loading ? (
+            <div style={{ padding: 16, color: inkSoft }}>Loading…</div>
+          ) : filtered.length === 0 ? (
+            <div style={{ padding: 16, color: inkSoft }}>
+              No subscriptions detected yet. This MVP logic looks for merchants with at least 3 similar charges.
+            </div>
+          ) : (
+            <div>
+              {filtered.map((s) => (
+                <div
+                  key={`${s.id}`}
+                  style={{
+                    padding: "14px 16px",
+                    borderTop: `1px solid ${line}`,
+                    display: "grid",
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, color: ink, lineHeight: 1.2 }}>
+                        {s.name}
+                      </div>
+                      <div style={{ color: inkSoft, fontSize: 13, marginTop: 4 }}>
+                        {cadenceLabel(s)}{" "}
+                        <span style={{ padding: "0 8px" }}>·</span>
+                        {annualLabel(s)}
+                        {s.category ? (
+                          <>
+                            <span style={{ padding: "0 8px" }}>·</span>
+                            {s.category}
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div style={{ textAlign: "right" }}>
+                      <div style={statusPillStyle(s)}>{statusLabel(s)}</div>
+                      <div style={{ color: inkSoft, fontSize: 13, marginTop: 6 }}>
+                        {fmtMoney(s.annualCost)}
+                        <span style={{ marginLeft: 6 }}>per year</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <button
+                      onClick={() =>
+                        patch(s.id, { status: "confirmed", needsReview: false })
+                      }
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: 999,
+                        border: `1px solid ${line}`,
+                        background: "rgba(20,16,12,0.06)",
+                        color: ink,
+                        cursor: "pointer",
+                        fontSize: 13,
+                      }}
+                    >
+                      Confirm
+                    </button>
+
+                    <button
+                      onClick={() => patch(s.id, { status: "ignored", needsReview: false })}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: 999,
+                        border: `1px solid ${line}`,
+                        background: "rgba(255,255,255,0.18)",
+                        color: ink,
+                        cursor: "pointer",
+                        fontSize: 13,
+                      }}
+                    >
+                      Ignore
+                    </button>
+
+                    <button
+                      onClick={() => patch(s.id, { status: "needs_review", needsReview: true })}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: 999,
+                        border: `1px solid rgba(140,40,40,0.22)`,
+                        background: "rgba(140,40,40,0.06)",
+                        color: ink,
+                        cursor: "pointer",
+                        fontSize: 13,
+                      }}
+                    >
+                      Needs review
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Debug (optional but handy) */}
+        <details
+          style={{
+            border: `1px solid ${line}`,
+            borderRadius: 18,
+            padding: 14,
+            background: "rgba(255,255,255,0.12)",
+          }}
+        >
+          <summary style={{ cursor: "pointer", color: ink, fontWeight: 700 }}>
+            Debug
+          </summary>
+          <div style={{ marginTop: 10, color: inkSoft, fontSize: 13 }}>
+            If you ever see a load error, open{" "}
+            <a href="/api/subscriptions" style={{ color: ink, textDecoration: "underline" }}>
+              /api/subscriptions
+            </a>{" "}
+            to view the raw response (auth errors will redirect you to login).
+          </div>
+        </details>
+      </div>
+    </Shell>
   );
 }

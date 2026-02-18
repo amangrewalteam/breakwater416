@@ -1,10 +1,11 @@
+// src/app/login/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import Shell from "@/components/Shell";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 import { ink, inkSoft, line } from "@/lib/style";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 const COOLDOWN_SECONDS = 60;
 
@@ -17,9 +18,28 @@ function setDevCookie() {
   document.cookie = `bw_dev_auth=1; path=/; max-age=${60 * 60 * 24}`;
 }
 
+function clearDevBypass() {
+  try {
+    localStorage.removeItem("bw_dev_auth");
+  } catch {}
+  // expire cookie
+  document.cookie = "bw_dev_auth=; path=/; max-age=0";
+}
+
+function getSafeNext(next: string | null) {
+  if (!next) return "/dashboard";
+  // only allow internal paths
+  if (next.startsWith("/")) return next;
+  return "/dashboard";
+}
+
 export default function LoginPage() {
   const router = useRouter();
+  const search = useSearchParams();
   const supabase = supabaseBrowser();
+
+  const nextParam = search.get("next");
+  const safeNext = getSafeNext(nextParam);
 
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
@@ -27,6 +47,24 @@ export default function LoginPage() {
 
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
+
+  // Surface errors returned to /login from /auth/callback
+  useEffect(() => {
+    const e = search.get("error");
+    const desc = search.get("error_description");
+    const code = search.get("error_code");
+
+    if (e || desc || code) {
+      // Common Supabase expired/invalid link case
+      const msg =
+        desc ||
+        (code === "otp_expired"
+          ? "Email link is invalid or has expired. Please request a fresh link."
+          : e);
+      if (msg) setErr(decodeURIComponent(msg));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!cooldownUntil) return;
@@ -48,9 +86,16 @@ export default function LoginPage() {
     setSent(false);
     setCooldownUntil(Date.now() + COOLDOWN_SECONDS * 1000);
 
+    // IMPORTANT:
+    // Use the current browser origin (Codespaces public URL). Do NOT hardcode :3000.
+    // Route through /auth/callback so we can exchange the code for a session server-side.
+    const emailRedirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(
+      safeNext
+    )}`;
+
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      options: { emailRedirectTo: `${window.location.origin}/onboarding` },
+      options: { emailRedirectTo },
     });
 
     if (error) {
@@ -69,9 +114,11 @@ export default function LoginPage() {
   }
 
   function continueDev() {
+    // Dev bypass should never coexist with real auth
+    clearDevBypass();
     localStorage.setItem("bw_dev_auth", "1");
     setDevCookie();
-    router.push("/onboarding");
+    router.push(safeNext === "/dashboard" ? "/onboarding" : safeNext);
   }
 
   return (
@@ -131,6 +178,10 @@ export default function LoginPage() {
         {sent ? (
           <div style={{ color: inkSoft }}>
             Sent. Open the newest email and click the link.
+            <div style={{ marginTop: 6, color: inkSoft }}>
+              If you see a weird URL with <code>:3000</code>, reopen the app from
+              Codespaces → Ports → “Open in Browser”, then request a fresh link.
+            </div>
           </div>
         ) : null}
 

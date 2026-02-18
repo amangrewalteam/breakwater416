@@ -3,7 +3,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getSubscriptionRepo } from "@/lib/subscriptionRepo";
+import { supabaseServer } from "@/lib/supabase/server";
+
+const TABLE = process.env.SUPABASE_SUBSCRIPTIONS_TABLE || "subscriptions";
 
 type Node = {
   id: string;
@@ -26,20 +28,31 @@ type Cluster = {
 
 export async function GET() {
   try {
-    const repo = getSubscriptionRepo();
-    const subs = (await repo.list())
-      .filter((s) => s.status === "confirmed")
-      .map((s) => ({
-        id: s.id,
-        label: s.name,
-        type: "merchant" as const,
-        category: s.category || "Other",
-        annualCost: s.annualCost,
-        cadence: s.cadence,
-        amount: s.amount,
-        confidence: s.confidence,
-        needsReview: s.needsReview,
-      }));
+    const supabase = supabaseServer();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+
+    const userId = String(auth.user.id);
+
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select("*")
+      .eq("user_id", userId)
+      .eq("status", "confirmed");
+
+    if (error) throw error;
+
+    const subs: Node[] = (data || []).map((r: any) => ({
+      id: r.id,
+      label: r.name,
+      type: "merchant",
+      category: r.category || "Other",
+      annualCost: Number(r.annual_cost),
+      cadence: r.cadence,
+      amount: Number(r.amount),
+      confidence: r.confidence || undefined,
+      needsReview: typeof r.needs_review === "boolean" ? r.needs_review : undefined,
+    }));
 
     const byCategory = new Map<string, Cluster>();
 
@@ -68,7 +81,6 @@ export async function GET() {
       totalAnnual: Math.round(totalAnnual * 100) / 100,
       clusters,
       model: "confirmed_subscriptions_only; category_clusters_v1",
-      storage: (process.env.STORAGE_DRIVER || "file").toLowerCase(),
     });
   } catch (e: any) {
     console.error("infrastructure GET error:", e?.message || e);

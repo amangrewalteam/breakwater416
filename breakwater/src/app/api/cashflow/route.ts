@@ -3,13 +3,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getSubscriptionRepo } from "@/lib/subscriptionRepo";
+import { supabaseServer } from "@/lib/supabase/server";
+
+const TABLE = process.env.SUPABASE_SUBSCRIPTIONS_TABLE || "subscriptions";
 
 type CashflowPoint = {
-  key: string;        // YYYY-MM
-  label: string;      // "Jan"
+  key: string;
+  label: string;
   year: number;
-  month: number;      // 1-12
+  month: number;
   total: number;
   byCategory: Record<string, number>;
 };
@@ -19,11 +21,9 @@ function monthKey(d: Date) {
   const m = d.getMonth() + 1;
   return `${y}-${String(m).padStart(2, "0")}`;
 }
-
 function monthLabel(d: Date) {
   return d.toLocaleString("en-CA", { month: "short" });
 }
-
 function addMonths(date: Date, delta: number) {
   const d = new Date(date);
   d.setMonth(d.getMonth() + delta);
@@ -32,12 +32,30 @@ function addMonths(date: Date, delta: number) {
 
 export async function GET(req: Request) {
   try {
+    const supabase = supabaseServer();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+
+    const userId = String(auth.user.id);
+
     const url = new URL(req.url);
     const monthsParam = url.searchParams.get("months");
     const months = Math.min(24, Math.max(3, Number(monthsParam || 6) || 6));
 
-    const repo = getSubscriptionRepo();
-    const subs = (await repo.list()).filter((s) => s.status === "confirmed");
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select("*")
+      .eq("user_id", userId)
+      .eq("status", "confirmed");
+
+    if (error) throw error;
+
+    const subs = (data || []).map((r: any) => ({
+      amount: Number(r.amount),
+      cadence: r.cadence as "monthly" | "yearly",
+      annualCost: Number(r.annual_cost),
+      category: r.category as string | null,
+    }));
 
     const now = new Date();
     const start = addMonths(new Date(now.getFullYear(), now.getMonth(), 1), -(months - 1));
@@ -80,7 +98,6 @@ export async function GET(req: Request) {
       max,
       currency: "CAD",
       model: "confirmed_subscriptions_only; yearly_spread_evenly",
-      storage: (process.env.STORAGE_DRIVER || "file").toLowerCase(),
     });
   } catch (e: any) {
     console.error("cashflow GET error:", e?.message || e);
