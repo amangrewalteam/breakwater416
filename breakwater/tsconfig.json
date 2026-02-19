@@ -29,6 +29,7 @@
   "exclude": [
     "node_modules",
     "_trash",
-    "_trash/**"
+    "_trash/**",
+    "prisma.config.ts"
   ]
 }
