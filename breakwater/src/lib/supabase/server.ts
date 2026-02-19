@@ -1,17 +1,8 @@
-// src/lib/supabase/server.ts
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
-type CookieStore = Awaited<ReturnType<typeof cookies>>;
-
-export type CookieToSet = {
-  name: string;
-  value: string;
-  options?: Parameters<CookieStore["set"]>[2];
-};
-
 export async function supabaseServer() {
-  const cookieStore = await cookies();
+  const cookieStore = await cookies(); // ✅ MUST be awaited
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -21,14 +12,13 @@ export async function supabaseServer() {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet: CookieToSet[]) {
+        setAll(cookiesToSet) {
           try {
             cookiesToSet.forEach(({ name, value, options }) => {
               cookieStore.set(name, value, options);
             });
           } catch {
-            // If called from a Server Component, this can throw.
-            // Middleware/Route Handlers are the safe place to set cookies.
+            // safe fallback
           }
         },
       },
