@@ -1,76 +1,52 @@
-// src/app/auth/callback/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
-export const runtime = "nodejs"; // avoid edge cookie quirks
+export const runtime = "nodejs";
 
-function getEnv() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  return { url, anon };
-}
+type CookieStore = Awaited<ReturnType<typeof cookies>>;
 
-function supabaseRouteClient() {
-  const { url, anon } = getEnv();
+type CookieToSet = {
+  name: string;
+  value: string;
+  options?: Parameters<CookieStore["set"]>[2];
+};
 
-  if (!url || !anon) {
-    // Throw a controlled error that we can handle in GET
-    throw new Error(
-      `Missing Supabase env. NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY is empty.`
-    );
-  }
-
-  const cookieStore = cookies();
-
-  return createServerClient(url, anon, {
-    cookies: {
-      getAll() {
-        return cookieStore.getAll();
-      },
-      setAll(cookiesToSet) {
-        // Next's cookies() is mutable in route handlers (node runtime).
-        cookiesToSet.forEach(({ name, value, options }) => {
-          cookieStore.set(name, value, options);
-        });
-      },
-    },
-  });
-}
-
-export async function GET(req: Request) {
-  const url = new URL(req.url);
+export async function GET(request: Request) {
+  const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const next = url.searchParams.get("next") || "/dashboard";
-  const safeNext = next.startsWith("/") ? next : "/dashboard";
+  const next = url.searchParams.get("next") ?? "/dashboard";
 
-  // If no code, return to login
   if (!code) {
-    return NextResponse.redirect(
-      new URL(`/login?next=${encodeURIComponent(safeNext)}&error=missing_code`, url.origin)
-    );
+    return NextResponse.redirect(new URL("/login?error=missing_code", url.origin));
   }
 
-  try {
-    const supabase = supabaseRouteClient();
+  const cookieStore = await cookies();
 
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-
-    if (error) {
-      return NextResponse.redirect(
-        new URL(
-          `/login?next=${encodeURIComponent(safeNext)}&error=exchange_failed`,
-          url.origin
-        )
-      );
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet: CookieToSet[]) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
     }
+  );
 
-    return NextResponse.redirect(new URL(safeNext, url.origin));
-  } catch (e: any) {
-    // Never 500 to the browser — redirect with a readable error.
-    const msg = encodeURIComponent(e?.message || "callback_failed");
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+
+  if (error) {
     return NextResponse.redirect(
-      new URL(`/login?next=${encodeURIComponent(safeNext)}&error=${msg}`, url.origin)
+      new URL(`/login?error=${encodeURIComponent(error.message)}`, url.origin)
     );
   }
+
+  return NextResponse.redirect(new URL(next, url.origin));
 }
