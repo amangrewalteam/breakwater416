@@ -1,8 +1,8 @@
+// src/app/dashboard/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { detectSubscriptions, Transaction } from "@/lib/subscriptionDetector";
-import { applySubscriptionRules, normalizeMerchantName } from "@/lib/subscriptionRules";
+import { Transaction } from "@/lib/subscriptionDetector";
 
 type Confidence = "high" | "med" | "low";
 
@@ -26,10 +26,10 @@ type StoredSubscription = {
 };
 
 type CashflowPoint = {
-  key: string;     // YYYY-MM
-  label: string;   // "Jan"
+  key: string; // YYYY-MM
+  label: string; // "Jan"
   year: number;
-  month: number;   // 1-12
+  month: number; // 1-12
   total: number;
   byCategory: Record<string, number>;
 };
@@ -60,39 +60,6 @@ function currency(n: number) {
   }
 }
 
-function stableId(normalized: string, cadence: string, amount: number) {
-  const amt = Math.round(amount * 100);
-  return `${normalized}::${cadence}::${amt}`;
-}
-
-function computeConfidence(s: {
-  occurrences?: number;
-  category?: string;
-  cadence: "monthly" | "yearly";
-}): { confidence: Confidence; needsReview: boolean; reason: string[] } {
-  const reasons: string[] = [];
-
-  const occ = typeof s.occurrences === "number" ? s.occurrences : 0;
-
-  let confidence: Confidence = "low";
-  if (occ >= 5) confidence = "high";
-  else if (occ >= 4) confidence = "med";
-  else if (occ >= 3) confidence = "low";
-
-  if (!s.category) {
-    reasons.push("missing_category");
-    confidence = "low";
-  }
-
-  if (occ === 3) reasons.push("min_occurrences");
-  if (s.cadence === "yearly") reasons.push("yearly_cadence_review");
-
-  const needsReview = confidence !== "high" || !s.category;
-  if (needsReview) reasons.push("needs_review");
-
-  return { confidence, needsReview, reason: reasons };
-}
-
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +70,9 @@ export default function DashboardPage() {
   // Phase 3.3
   const [cashflow, setCashflow] = useState<CashflowResponse | null>(null);
   const [cashflowError, setCashflowError] = useState<string | null>(null);
+
+  // Timeline months toggle
+  const [monthsShown, setMonthsShown] = useState(6);
 
   async function refreshSubsFromStore() {
     const r = await fetch("/api/subscriptions", { cache: "no-store" });
@@ -124,55 +94,6 @@ export default function DashboardPage() {
     }
   }
 
-  async function syncDetectedToStore(detected: ReturnType<typeof detectSubscriptions>) {
-    const now = new Date().toISOString();
-
-    const suggestions: StoredSubscription[] = detected.map((d: any) => {
-      const rr = applySubscriptionRules(d.name);
-      const canonical = rr.canonicalName || d.name;
-
-      const normalized = normalizeMerchantName(canonical);
-      const id = stableId(normalized, d.cadence, d.amount);
-
-      const conf = computeConfidence({
-        occurrences: d.occurrences,
-        category: rr.category,
-        cadence: d.cadence,
-      });
-
-      const status = rr.status ?? "suggested";
-      const reason = [...(rr.reason || []), ...conf.reason];
-
-      return {
-        id,
-        name: canonical,
-        normalized,
-        amount: d.amount,
-        cadence: d.cadence,
-        annualCost: d.annualCost,
-        lastSeen: d.lastSeen,
-        occurrences: d.occurrences,
-        status,
-        category: rr.category,
-        confidence: conf.confidence,
-        needsReview: conf.needsReview,
-        reason: reason.length ? Array.from(new Set(reason)) : undefined,
-        updatedAt: now,
-      };
-    });
-
-    const r = await fetch("/api/subscriptions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ suggestions }),
-    });
-
-    const data = await r.json();
-    if (!r.ok) throw new Error(data?.error || "Failed to sync subscriptions");
-
-    await refreshSubsFromStore();
-  }
-
   useEffect(() => {
     let alive = true;
 
@@ -181,6 +102,7 @@ export default function DashboardPage() {
         setLoading(true);
         setError(null);
 
+        // Keep the transactions fetch for debug/visibility, but DO NOT auto-sync to store
         const tr = await fetch("/api/transactions", { cache: "no-store" });
         const txData = await tr.json();
 
@@ -190,11 +112,11 @@ export default function DashboardPage() {
         if (!alive) return;
         setTransactions(txData as Transaction[]);
 
-        const detected = detectSubscriptions(txData as Transaction[]);
-        await syncDetectedToStore(detected);
-
-        // Phase 3.3: compute timeline from confirmed subs (stored)
-        await refreshCashflow(6);
+        // QUICK FIX:
+        // Do NOT call detectSubscriptions() + POST /api/subscriptions on page load.
+        // It can fail due to duplicates/constraints and breaks the dashboard even when data already exists.
+        await refreshSubsFromStore();
+        await refreshCashflow(monthsShown);
       } catch (e: any) {
         if (!alive) return;
         setError(e?.message || "Something went wrong");
@@ -245,7 +167,7 @@ export default function DashboardPage() {
     if (!r.ok) throw new Error(data?.error || "Failed to update subscription");
 
     await refreshSubsFromStore();
-    await refreshCashflow(6); // keep timeline in sync
+    await refreshCashflow(monthsShown);
   }
 
   const styles: Record<string, React.CSSProperties> = {
@@ -288,33 +210,90 @@ export default function DashboardPage() {
     k: { fontSize: 12, textTransform: "uppercase", letterSpacing: "0.10em", color: MUTED, marginBottom: 10 },
     v: { fontSize: 22, fontWeight: 560, letterSpacing: "-0.01em" },
 
-    panel: { background: "rgba(255, 255, 255, 0.22)", border: `1px solid ${BORDER}`, borderRadius: 18, overflow: "hidden", marginTop: 14 },
-    panelHead: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, padding: "14px 16px", borderBottom: `1px solid ${BORDER}`, background: "rgba(255, 255, 255, 0.18)" },
+    panel: {
+      background: "rgba(255, 255, 255, 0.22)",
+      border: `1px solid ${BORDER}`,
+      borderRadius: 18,
+      overflow: "hidden",
+      marginTop: 14,
+    },
+    panelHead: {
+      display: "flex",
+      alignItems: "baseline",
+      justifyContent: "space-between",
+      gap: 12,
+      padding: "14px 16px",
+      borderBottom: `1px solid ${BORDER}`,
+      background: "rgba(255, 255, 255, 0.18)",
+    },
     panelTitle: { fontSize: 14, fontWeight: 650, margin: 0 },
     panelNote: { fontSize: 12, color: MUTED, margin: 0, whiteSpace: "nowrap" },
 
     list: { listStyle: "none", padding: 0, margin: 0 },
-    row: { padding: "14px 16px", display: "flex", justifyContent: "space-between", gap: 16, borderBottom: `1px solid ${BORDER}` },
+    row: {
+      padding: "14px 16px",
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 16,
+      borderBottom: `1px solid ${BORDER}`,
+    },
     name: { fontSize: 14, fontWeight: 650, margin: 0, color: INK },
     meta: { marginTop: 6, fontSize: 12, color: MUTED, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-    badge: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid ${BORDER}`, background: "rgba(255,255,255,0.22)", color: "rgba(20,16,12,0.72)" },
-    badgeHot: { fontSize: 11, padding: "3px 10px", borderRadius: 9999, border: `1px solid rgba(155,28,28,0.25)`, background: "rgba(155,28,28,0.08)", color: "rgba(155,28,28,0.90)" },
+    badge: {
+      fontSize: 11,
+      padding: "3px 10px",
+      borderRadius: 9999,
+      border: `1px solid ${BORDER}`,
+      background: "rgba(255,255,255,0.22)",
+      color: "rgba(20,16,12,0.72)",
+    },
+    badgeHot: {
+      fontSize: 11,
+      padding: "3px 10px",
+      borderRadius: 9999,
+      border: `1px solid rgba(155,28,28,0.25)`,
+      background: "rgba(155,28,28,0.08)",
+      color: "rgba(155,28,28,0.90)",
+    },
     right: { textAlign: "right", minWidth: 220 },
     big: { fontSize: 14, fontWeight: 700, margin: 0, color: INK },
     small: { marginTop: 6, fontSize: 12, color: MUTED },
 
     actions: { display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10, flexWrap: "wrap" },
-    btn: { border: `1px solid ${BORDER}`, background: "rgba(255,255,255,0.26)", padding: "8px 12px", borderRadius: 9999, cursor: "pointer", fontSize: 13, color: INK },
-    btnGhost: { border: `1px solid ${BORDER}`, background: "transparent", padding: "8px 12px", borderRadius: 9999, cursor: "pointer", fontSize: 13, color: "rgba(20,16,12,0.74)" },
+    btn: {
+      border: `1px solid ${BORDER}`,
+      background: "rgba(255,255,255,0.26)",
+      padding: "8px 12px",
+      borderRadius: 9999,
+      cursor: "pointer",
+      fontSize: 13,
+      color: INK,
+    },
+    btnGhost: {
+      border: `1px solid ${BORDER}`,
+      background: "transparent",
+      padding: "8px 12px",
+      borderRadius: 9999,
+      cursor: "pointer",
+      fontSize: 13,
+      color: "rgba(20,16,12,0.74)",
+    },
 
-    notice: { background: "rgba(255,255,255,0.22)", border: `1px solid ${BORDER}`, borderRadius: 18, padding: "16px 16px", fontSize: 14, color: MUTED },
+    notice: {
+      background: "rgba(255,255,255,0.22)",
+      border: `1px solid ${BORDER}`,
+      borderRadius: 18,
+      padding: "16px 16px",
+      fontSize: 14,
+      color: MUTED,
+    },
     errorText: { marginTop: 8, marginBottom: 0, color: "rgba(155,28,28,0.9)" },
 
     // Timeline UI
     timelineWrap: { padding: "14px 16px" },
     timelineGrid: {
       display: "grid",
-      gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
+      gridTemplateColumns: `repeat(${monthsShown}, minmax(0, 1fr))`,
       gap: 10,
       alignItems: "end",
       marginTop: 12,
@@ -349,7 +328,9 @@ export default function DashboardPage() {
           <h1 style={styles.h1}>Dashboard</h1>
           <p style={styles.sub}>
             <span style={{ opacity: 0.85 }}>Subscriptions are persisted + scored.</span>
-            <a href="/subscriptions" style={styles.link}>Manage all subscriptions</a>
+            <a href="/subscriptions" style={styles.link}>
+              Manage all subscriptions
+            </a>
           </p>
 
           <div style={styles.grid}>
@@ -378,7 +359,9 @@ export default function DashboardPage() {
           <div style={styles.notice}>
             <div style={{ fontWeight: 800, color: INK }}>Couldn’t load</div>
             <p style={styles.errorText}>{error}</p>
-            <button style={styles.btn} onClick={() => window.location.reload()}>Retry</button>
+            <button style={styles.btn} onClick={() => window.location.reload()}>
+              Retry
+            </button>
           </div>
         ) : (
           <>
@@ -386,33 +369,34 @@ export default function DashboardPage() {
             <section style={styles.panel}>
               <div style={styles.panelHead}>
                 <p style={styles.panelTitle}>Monthly cashflow</p>
-                <p style={styles.panelNote}>
-                  last 6 months · confirmed only
-                </p>
+                <p style={styles.panelNote}>last {monthsShown} months · confirmed only</p>
               </div>
 
               <div style={styles.timelineWrap}>
                 {cashflowError ? (
-                  <div style={{ color: "rgba(155,28,28,0.9)", fontSize: 13 }}>
-                    {cashflowError}
-                  </div>
+                  <div style={{ color: "rgba(155,28,28,0.9)", fontSize: 13 }}>{cashflowError}</div>
                 ) : !cashflow ? (
-                  <div style={{ color: MUTED, fontSize: 13 }}>
-                    Preparing timeline…
-                  </div>
+                  <div style={{ color: MUTED, fontSize: 13 }}>Preparing timeline…</div>
                 ) : (
                   <>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
                       <div style={{ fontSize: 13, color: MUTED }}>
                         Model: yearly subscriptions spread evenly (annual/12).
                       </div>
-                      <button style={styles.btnGhost} onClick={() => refreshCashflow(12)}>
-                        Show 12 months
+                      <button
+                        style={styles.btnGhost}
+                        onClick={() => {
+                          const next = monthsShown === 6 ? 12 : 6;
+                          setMonthsShown(next);
+                          refreshCashflow(next);
+                        }}
+                      >
+                        {monthsShown === 6 ? "Show 12 months" : "Show 6 months"}
                       </button>
                     </div>
 
                     <div style={styles.timelineGrid}>
-                      {timeline.slice(-6).map((p) => {
+                      {timeline.slice(-monthsShown).map((p) => {
                         const h = max > 0 ? Math.max(10, Math.round((p.total / max) * 120)) : 10;
                         return (
                           <div key={p.key} style={styles.barCol} title={p.key}>
@@ -436,9 +420,7 @@ export default function DashboardPage() {
               </div>
 
               {confirmed.length === 0 ? (
-                <div style={{ padding: "16px", color: MUTED }}>
-                  No confirmed subscriptions yet — confirm a few suggestions below.
-                </div>
+                <div style={{ padding: "16px", color: MUTED }}>No confirmed subscriptions yet — confirm a few suggestions below.</div>
               ) : (
                 <ul style={styles.list}>
                   {confirmed.map((s, idx) => (
@@ -452,7 +434,9 @@ export default function DashboardPage() {
                       <div>
                         <p style={styles.name}>{s.name}</p>
                         <div style={styles.meta}>
-                          <span>{currency(s.amount)} / {s.cadence}</span>
+                          <span>
+                            {currency(s.amount)} / {s.cadence}
+                          </span>
                           {s.category ? <span style={styles.badge}>{s.category}</span> : null}
                           {s.needsReview ? <span style={styles.badgeHot}>Needs review</span> : null}
                           {s.confidence ? <span style={styles.badge}>{s.confidence}</span> : null}
@@ -485,9 +469,7 @@ export default function DashboardPage() {
               </div>
 
               {suggested.length === 0 ? (
-                <div style={{ padding: "16px", color: MUTED }}>
-                  No suggested subscriptions right now.
-                </div>
+                <div style={{ padding: "16px", color: MUTED }}>No suggested subscriptions right now.</div>
               ) : (
                 <ul style={styles.list}>
                   {suggested.map((s, idx) => (
@@ -501,7 +483,9 @@ export default function DashboardPage() {
                       <div>
                         <p style={styles.name}>{s.name}</p>
                         <div style={styles.meta}>
-                          <span>{currency(s.amount)} / {s.cadence}</span>
+                          <span>
+                            {currency(s.amount)} / {s.cadence}
+                          </span>
                           {s.category ? <span style={styles.badge}>{s.category}</span> : null}
                           {s.needsReview ? <span style={styles.badgeHot}>Needs review</span> : null}
                           {s.confidence ? <span style={styles.badge}>{s.confidence}</span> : null}
@@ -531,15 +515,21 @@ export default function DashboardPage() {
             </section>
 
             {/* Debug */}
-            <details style={{ marginTop: 14, border: `1px solid ${BORDER}`, borderRadius: 18, padding: "14px 16px", background: "rgba(255, 255, 255, 0.20)" }}>
+            <details
+              style={{
+                marginTop: 14,
+                border: `1px solid ${BORDER}`,
+                borderRadius: 18,
+                padding: "14px 16px",
+                background: "rgba(255, 255, 255, 0.20)",
+              }}
+            >
               <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 14 }}>Debug</summary>
               <div style={{ marginTop: 12 }}>
                 <div style={{ fontSize: 12, color: MUTED, letterSpacing: "0.08em", textTransform: "uppercase" }}>
                   Transactions loaded
                 </div>
-                <div style={{ marginTop: 6, fontSize: 14, color: INK }}>
-                  {transactions.length}
-                </div>
+                <div style={{ marginTop: 6, fontSize: 14, color: INK }}>{transactions.length}</div>
 
                 <div style={{ marginTop: 14, fontSize: 12, color: MUTED, letterSpacing: "0.08em", textTransform: "uppercase" }}>
                   First few transactions
