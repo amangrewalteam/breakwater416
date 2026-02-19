@@ -1,92 +1,73 @@
-// src/app/api/cashflow/route.ts
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase/server";
 
-const TABLE = process.env.SUPABASE_SUBSCRIPTIONS_TABLE || "subscriptions";
-
-type CashflowPoint = {
-  key: string;
-  label: string;
-  year: number;
-  month: number;
-  total: number;
-  byCategory: Record<string, number>;
-};
-
 function monthKey(d: Date) {
-  const y = d.getFullYear();
-  const m = d.getMonth() + 1;
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
   return `${y}-${String(m).padStart(2, "0")}`;
 }
+
 function monthLabel(d: Date) {
-  return d.toLocaleString("en-CA", { month: "short" });
-}
-function addMonths(date: Date, delta: number) {
-  const d = new Date(date);
-  d.setMonth(d.getMonth() + delta);
-  return d;
+  return d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
 }
 
 export async function GET(req: Request) {
   try {
-    const supabase = supabaseServer();
+    const { searchParams } = new URL(req.url);
+    const months = Math.max(1, Math.min(24, Number(searchParams.get("months") || 6)));
+
+    // ✅ IMPORTANT: supabaseServer() is async
+    const supabase = await supabaseServer();
+
     const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    if (!auth?.user) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    }
 
     const userId = String(auth.user.id);
 
-    const url = new URL(req.url);
-    const monthsParam = url.searchParams.get("months");
-    const months = Math.min(24, Math.max(3, Number(monthsParam || 6) || 6));
-
-    const { data, error } = await supabase
-      .from(TABLE)
+    // Load subscriptions for this user (expects your /api/subscriptions store is keyed by user)
+    // If your table name differs, update it here.
+    const { data: subs, error } = await supabase
+      .from("subscriptions")
       .select("*")
       .eq("user_id", userId)
-      .eq("status", "confirmed");
+      .neq("status", "ignored");
 
     if (error) throw error;
 
-    const subs = (data || []).map((r: any) => ({
-      amount: Number(r.amount),
-      cadence: r.cadence as "monthly" | "yearly",
-      annualCost: Number(r.annual_cost),
-      category: r.category as string | null,
-    }));
+    const confirmed = (subs || []).filter((s: any) => s.status === "confirmed");
 
+    // Build month buckets
     const now = new Date();
-    const start = addMonths(new Date(now.getFullYear(), now.getMonth(), 1), -(months - 1));
+    const points: any[] = [];
+    const byKey: Record<string, any> = {};
 
-    const points: CashflowPoint[] = [];
-    for (let i = 0; i < months; i++) {
-      const d = addMonths(start, i);
-      points.push({
-        key: monthKey(d),
+    for (let i = months - 1; i >= 0; i--) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+      const key = monthKey(d);
+      byKey[key] = {
+        key,
         label: monthLabel(d),
-        year: d.getFullYear(),
-        month: d.getMonth() + 1,
+        year: d.getUTCFullYear(),
+        month: d.getUTCMonth() + 1,
         total: 0,
         byCategory: {},
-      });
+      };
+      points.push(byKey[key]);
     }
 
-    for (const s of subs) {
-      const category = s.category || "Other";
-      const monthlyContribution = s.cadence === "monthly" ? s.amount : (s.annualCost || s.amount) / 12;
+    // Model: monthly = full amount each month; yearly spread evenly across 12 months.
+    for (const s of confirmed) {
+      const amount = Number(s.amount || 0);
+      const cadence = String(s.cadence || "monthly");
+      const category = s.category ? String(s.category) : "Uncategorized";
+
+      const monthlyEquivalent = cadence === "yearly" ? amount / 12 : amount;
 
       for (const p of points) {
-        p.total += monthlyContribution;
-        p.byCategory[category] = (p.byCategory[category] || 0) + monthlyContribution;
-      }
-    }
-
-    for (const p of points) {
-      p.total = Math.round(p.total * 100) / 100;
-      for (const k of Object.keys(p.byCategory)) {
-        p.byCategory[k] = Math.round(p.byCategory[k] * 100) / 100;
+        p.total += monthlyEquivalent;
+        p.byCategory[category] = (p.byCategory[category] || 0) + monthlyEquivalent;
       }
     }
 
@@ -97,10 +78,12 @@ export async function GET(req: Request) {
       points,
       max,
       currency: "CAD",
-      model: "confirmed_subscriptions_only; yearly_spread_evenly",
+      model: "yearly_spread_evenly",
     });
   } catch (e: any) {
-    console.error("cashflow GET error:", e?.message || e);
-    return NextResponse.json({ error: "Failed to compute cashflow" }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || "Failed to compute cashflow" },
+      { status: 500 }
+    );
   }
 }
