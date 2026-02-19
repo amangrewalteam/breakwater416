@@ -1,4 +1,6 @@
 import { IVORY, ink, inkSoft, line } from "@/lib/style";
+import React from "react";
+
 
 export default function Shell({
   title,
@@ -7,7 +9,7 @@ export default function Shell({
   children,
 }: {
   title: string;
-  subtitle?: string;
+  subtitle?: React.ReactNode;
   right?: React.ReactNode;
   children: React.ReactNode;
 }) {

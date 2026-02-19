@@ -3,11 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ink, line } from "@/lib/style";
 
-declare global {
-  interface Window {
-    Plaid: any;
-  }
-}
 
 export default function PlaidConnectButton({
   onConnected,
