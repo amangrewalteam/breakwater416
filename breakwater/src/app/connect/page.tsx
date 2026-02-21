@@ -1,4 +1,3 @@
-// src/app/connect/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -15,7 +14,6 @@ export default function ConnectPage() {
   useEffect(() => {
     (async () => {
       setStatus("Preparing link…");
-
       const res = await fetch("/api/create-link-token", { method: "POST" });
       const json = await res.json().catch(() => ({}));
 
@@ -24,7 +22,7 @@ export default function ConnectPage() {
         return;
       }
 
-      setLinkToken(json.link_token);
+      setLinkToken((json as any).link_token);
       setStatus("");
     })();
   }, []);
@@ -32,41 +30,37 @@ export default function ConnectPage() {
   const { open, ready } = usePlaidLink({
     token: linkToken,
     onSuccess: async (public_token, metadata) => {
-      try {
-        setStatus("Saving connection…");
+      setStatus("Saving connection…");
 
-        const res = await fetch("/api/exchange-public-token", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            public_token,
-            institution_name: metadata?.institution?.name ?? null,
-          }),
-        });
+      const res = await fetch("/api/exchange-public-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          public_token,
+          institution_name: metadata?.institution?.name ?? null,
+        }),
+      });
 
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setStatus(json?.error || `Could not save connection (${res.status})`);
-          return;
-        }
-
-        const item_id = json.item_id;
-
-        setStatus("Syncing…");
-        await fetch("/api/transactions/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ item_id }),
-        }).catch(() => {});
-
-        setStatus("Detecting subscriptions…");
-        await fetch("/api/subscriptions", { method: "POST" }).catch(() => {});
-
-        setStatus("Connected.");
-        router.push("/dashboard");
-      } catch (e: any) {
-        setStatus(e?.message || "Something went wrong");
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatus(json?.error || `Could not save connection (${res.status})`);
+        return;
       }
+
+      const item_id = (json as any).item_id;
+
+      setStatus("Syncing…");
+      await fetch("/api/transactions/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_id }),
+      }).catch(() => {});
+
+      setStatus("Detecting subscriptions…");
+      await fetch("/api/subscriptions", { method: "POST" }).catch(() => {});
+
+      setStatus("Connected.");
+      router.push("/dashboard");
     },
   });
 
