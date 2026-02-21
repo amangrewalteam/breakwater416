@@ -1,9 +1,6 @@
 // src/app/api/create-link-token/route.ts
 import { NextResponse } from "next/server";
-import {
-  CountryCode,
-  Products,
-} from "plaid";
+import { CountryCode, Products } from "plaid";
 import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
 import { log, logError } from "@/lib/log";
@@ -26,17 +23,25 @@ export async function POST() {
       user: { client_user_id: userId },
       client_name: "Breakwater",
       products: [Products.Transactions],
-      country_codes: [CountryCode.Us, CountryCode.Ca],
+      country_codes: [CountryCode.US, CountryCode.CA],
       language: "en",
     });
 
     log("plaid.link_token.ok", { userId });
-
     return NextResponse.json({ link_token: resp.data.link_token });
   } catch (e: any) {
-    logError("plaid.link_token.err", e);
+    const plaid = e?.response?.data;
+    // This is the important part: shows error_code + error_message in Vercel logs
+    console.error("PLAID linkTokenCreate error:", plaid || e);
+
+    logError("plaid.link_token.err", e, {
+      plaid_error_code: plaid?.error_code,
+      plaid_error_type: plaid?.error_type,
+      plaid_error_message: plaid?.error_message,
+    });
+
     return NextResponse.json(
-      { error: "Failed to create link token" },
+      { error: plaid?.error_message || e?.message || "Failed to create link token" },
       { status: 500 }
     );
   }
