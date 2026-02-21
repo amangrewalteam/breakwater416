@@ -1,27 +1,38 @@
+// src/app/api/create-link-token/route.ts
 import { NextResponse } from "next/server";
 import { plaidClient } from "@/lib/plaid";
-import { Products, CountryCode } from "plaid";
+import { supabaseServer } from "@/lib/supabase/server";
+import { log, logError } from "@/lib/log";
 
 export async function POST() {
+  log("plaid.link_token.start");
+
   try {
+    const supabase = await supabaseServer();
+    const { data, error } = await supabase.auth.getUser();
+
+    if (error || !data?.user) {
+      log("plaid.link_token.unauthorized");
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const userId = data.user.id;
+
     const resp = await plaidClient.linkTokenCreate({
-      user: {
-        // For sandbox/dev this can be any stable identifier
-        client_user_id: "dev-user",
-      },
+      user: { client_user_id: userId },
       client_name: "Breakwater",
-      products: [Products.Transactions],
-      country_codes: [CountryCode.Us],
+      products: ["transactions"],
+      country_codes: ["US", "CA"],
       language: "en",
     });
 
+    log("plaid.link_token.ok", { userId });
+
     return NextResponse.json({ link_token: resp.data.link_token });
   } catch (e: any) {
-    console.error("create-link-token error:", e?.response?.data || e);
+    logError("plaid.link_token.err", e);
     return NextResponse.json(
-      {
-        error: e?.response?.data || e?.message || "Failed to create link token",
-      },
+      { error: "Failed to create link token" },
       { status: 500 }
     );
   }
