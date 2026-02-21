@@ -1,5 +1,9 @@
 // src/app/api/create-link-token/route.ts
 import { NextResponse } from "next/server";
+import {
+  CountryCode,
+  Products,
+} from "plaid";
 import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
 import { log, logError } from "@/lib/log";
@@ -21,8 +25,8 @@ export async function POST() {
     const resp = await plaidClient.linkTokenCreate({
       user: { client_user_id: userId },
       client_name: "Breakwater",
-      products: ["transactions"],
-      country_codes: ["US", "CA"],
+      products: [Products.Transactions],
+      country_codes: [CountryCode.US, CountryCode.CA],
       language: "en",
     });
 

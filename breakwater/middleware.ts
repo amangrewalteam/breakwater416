@@ -1,6 +1,12 @@
+// src/middleware.ts
 import { NextResponse, type NextRequest } from "next/server";
 
 const PROTECTED_PREFIXES = ["/dashboard", "/connect", "/manage"];
+
+function hasSupabaseSessionCookie(req: NextRequest) {
+  // Supabase cookies can vary by version/project; safest is: any cookie starting with "sb-"
+  return req.cookies.getAll().some((c) => c.name.startsWith("sb-"));
+}
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -8,16 +14,7 @@ export function middleware(req: NextRequest) {
   const isProtected = PROTECTED_PREFIXES.some((p) => pathname.startsWith(p));
   if (!isProtected) return NextResponse.next();
 
-  // Supabase sets auth cookies; simplest gate is: if no sb-* cookie, send to login
-  const hasSupabaseCookie =
-    req.cookies.get("sb-access-token") ||
-    req.cookies.get("sb-refresh-token") ||
-    // newer cookie names can be project-scoped:
-    Object.keys(req.cookies.getAll().reduce((a, c) => ((a[c.name] = 1), a), {})).some((k) =>
-      k.startsWith("sb-")
-    );
-
-  if (!hasSupabaseCookie) {
+  if (!hasSupabaseSessionCookie(req)) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("redirect", pathname);

@@ -1,24 +1,24 @@
+// src/app/auth/callback/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
-export const runtime = "nodejs";
-
-type CookieStore = Awaited<ReturnType<typeof cookies>>;
-
 type CookieToSet = {
   name: string;
   value: string;
-  options?: Parameters<CookieStore["set"]>[2];
+  options?: any;
 };
 
-export async function GET(request: Request) {
-  const url = new URL(request.url);
+export async function GET(req: Request) {
+  const url = new URL(req.url);
   const code = url.searchParams.get("code");
-  const next = url.searchParams.get("next") ?? "/dashboard";
+  const redirect = url.searchParams.get("redirect") || "/dashboard";
+  const origin = url.origin;
 
   if (!code) {
-    return NextResponse.redirect(new URL("/login?error=missing_code", url.origin));
+    return NextResponse.redirect(
+      `${origin}/login?redirect=${encodeURIComponent(redirect)}`
+    );
   }
 
   const cookieStore = await cookies();
@@ -44,9 +44,9 @@ export async function GET(request: Request) {
 
   if (error) {
     return NextResponse.redirect(
-      new URL(`/login?error=${encodeURIComponent(error.message)}`, url.origin)
+      `${origin}/login?redirect=${encodeURIComponent(redirect)}`
     );
   }
 
-  return NextResponse.redirect(new URL(next, url.origin));
+  return NextResponse.redirect(`${origin}${redirect}`);
 }
