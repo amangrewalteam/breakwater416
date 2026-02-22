@@ -1,11 +1,190 @@
-// src/app/login/page.tsx
-import { Suspense } from "react";
-import LoginClient from "./LoginClient";
+"use client";
 
-export default function Page() {
+import { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { createBrowserClient } from "@supabase/ssr";
+
+const IVORY = "#F6F3EE";
+
+export default function LoginPage() {
+  const router = useRouter();
+  const params = useSearchParams();
+  const redirectTo = params.get("redirect") || "/dashboard";
+
+  const supabase = useMemo(() => {
+    return createBrowserClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+  }, []);
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loadingOtp, setLoadingOtp] = useState(false);
+  const [loadingPw, setLoadingPw] = useState(false);
+
+  async function sendMagicLink(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoadingOtp(true);
+
+    try {
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: `${window.location.origin}${redirectTo}`,
+        },
+      });
+
+      if (error) throw error;
+      setSent(true);
+    } catch (err: any) {
+      setError(err?.message || "Could not send link");
+    } finally {
+      setLoadingOtp(false);
+    }
+  }
+
+  async function signInWithPassword(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoadingPw(true);
+
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) throw error;
+
+      // Go where we intended after auth
+      router.push(redirectTo);
+      router.refresh();
+    } catch (err: any) {
+      setError(err?.message || "Could not sign in");
+    } finally {
+      setLoadingPw(false);
+    }
+  }
+
   return (
-    <Suspense fallback={null}>
-      <LoginClient />
-    </Suspense>
+    <main
+      style={{
+        background: IVORY,
+        minHeight: "100vh",
+        padding: "64px 28px",
+        fontFamily:
+          'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif',
+        color: "#1d1d1d",
+      }}
+    >
+      <div style={{ maxWidth: 560 }}>
+        <h1 style={{ fontSize: 44, margin: 0, letterSpacing: "-0.02em" }}>
+          Login
+        </h1>
+        <p style={{ marginTop: 10, opacity: 0.75 }}>
+          Magic link is lovely—until rate limits. Password works instantly.
+        </p>
+
+        <div
+          style={{
+            marginTop: 24,
+            border: "1px solid rgba(0,0,0,0.10)",
+            borderRadius: 14,
+            padding: 18,
+            background: "rgba(255,255,255,0.35)",
+          }}
+        >
+          <label style={{ display: "block", fontSize: 13, opacity: 0.8 }}>
+            Email
+          </label>
+          <input
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            type="email"
+            required
+            placeholder="you@domain.com"
+            style={{
+              marginTop: 8,
+              width: "100%",
+              padding: "12px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(0,0,0,0.14)",
+              background: "rgba(255,255,255,0.65)",
+              outline: "none",
+              fontSize: 16,
+            }}
+          />
+
+          <label
+            style={{ display: "block", fontSize: 13, opacity: 0.8, marginTop: 14 }}
+          >
+            Password (recommended for dev)
+          </label>
+          <input
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            type="password"
+            placeholder="••••••••"
+            style={{
+              marginTop: 8,
+              width: "100%",
+              padding: "12px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(0,0,0,0.14)",
+              background: "rgba(255,255,255,0.65)",
+              outline: "none",
+              fontSize: 16,
+            }}
+          />
+
+          {error ? (
+            <p style={{ marginTop: 12, color: "#7a1d1d" }}>{error}</p>
+          ) : null}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+            <button
+              onClick={signInWithPassword}
+              disabled={loadingPw || !email || !password}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 999,
+                border: "1px solid rgba(0,0,0,0.18)",
+                background: "rgba(0,0,0,0.02)",
+                cursor: "pointer",
+                fontFamily: "inherit",
+              }}
+            >
+              {loadingPw ? "Signing in…" : "Sign in with password"}
+            </button>
+
+            <button
+              onClick={sendMagicLink}
+              disabled={loadingOtp || !email}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 999,
+                border: "1px solid rgba(0,0,0,0.18)",
+                background: "rgba(0,0,0,0.02)",
+                cursor: "pointer",
+                fontFamily: "inherit",
+              }}
+            >
+              {loadingOtp ? "Sending…" : "Send magic link"}
+            </button>
+          </div>
+
+          {sent ? (
+            <p style={{ marginTop: 12, opacity: 0.75, lineHeight: 1.5 }}>
+              Link sent. If you hit rate limits, use password sign-in above.
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </main>
   );
 }
