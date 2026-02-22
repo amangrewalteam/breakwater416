@@ -1,131 +1,106 @@
-// src/app/login/LoginClient.tsx
 "use client";
 
-import { useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { createBrowserClient } from "@supabase/ssr";
+import * as React from "react";
+import { supabaseBrowser } from "@/lib/supabase/browser";
 
-const IVORY = "#F6F3EE";
+function getOrigin() {
+  // Prefer explicit env var (best for Vercel), fall back to window.origin in browser
+  const env =
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.NEXT_PUBLIC_VERCEL_URL ||
+    "";
 
-export default function LoginClient() {
-  const params = useSearchParams();
-  const redirectTo = params.get("redirect") || params.get("next") || "/dashboard";
-
-  const supabase = useMemo(() => {
-    return createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
-  }, []);
-
-  const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  async function sendMagicLink(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-
-    try {
-      const emailRedirectTo = `${window.location.origin}/auth/callback?redirect=${encodeURIComponent(
-        redirectTo
-      )}`;
-
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: { emailRedirectTo },
-      });
-
-      if (error) throw error;
-
-      setSent(true);
-    } catch (err: any) {
-      setError(err?.message || "Could not send link");
-    } finally {
-      setLoading(false);
-    }
+  // NEXT_PUBLIC_VERCEL_URL sometimes comes without scheme
+  if (env) {
+    if (env.startsWith("http://") || env.startsWith("https://")) return env;
+    return `https://${env}`;
   }
 
+  if (typeof window !== "undefined") return window.location.origin;
+  return "";
+}
+
+export default function LoginClient() {
+  const [email, setEmail] = React.useState("");
+  const [status, setStatus] = React.useState<
+    "idle" | "sending" | "sent" | "error"
+  >("idle");
+  const [message, setMessage] = React.useState<string>("");
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+
+    const trimmed = email.trim().toLowerCase();
+    if (!trimmed) {
+      setStatus("error");
+      setMessage("Please enter your email.");
+      return;
+    }
+
+    setStatus("sending");
+    setMessage("");
+
+    const supabase = supabaseBrowser();
+    const origin = getOrigin();
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email: trimmed,
+      options: {
+        emailRedirectTo: `${origin}/auth/callback`,
+      },
+    });
+
+    if (error) {
+      setStatus("error");
+      setMessage(error.message || "Could not send magic link.");
+      return;
+    }
+
+    setStatus("sent");
+    setMessage("Magic link sent. Check your email.");
+  }
+
+  const disabled = status === "sending";
+
   return (
-    <main
-      style={{
-        background: IVORY,
-        minHeight: "100vh",
-        padding: "64px 28px",
-        fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif',
-        color: "#1d1d1d",
-      }}
-    >
-      <div style={{ maxWidth: 520 }}>
-        <h1 style={{ fontSize: 44, margin: 0, letterSpacing: "-0.02em" }}>
-          Login
-        </h1>
-        <p style={{ marginTop: 10, opacity: 0.75 }}>
-          We’ll email you a quiet link. No passwords.
-        </p>
-
-        <div
-          style={{
-            marginTop: 24,
-            border: "1px solid rgba(0,0,0,0.10)",
-            borderRadius: 14,
-            padding: 18,
-            background: "rgba(255,255,255,0.35)",
-          }}
-        >
-          {sent ? (
-            <p style={{ margin: 0, lineHeight: 1.5 }}>
-              Check your email. Open the link to continue to{" "}
-              <span style={{ textDecoration: "underline" }}>{redirectTo}</span>.
-            </p>
-          ) : (
-            <form onSubmit={sendMagicLink}>
-              <label style={{ display: "block", fontSize: 13, opacity: 0.8 }}>
-                Email
-              </label>
-              <input
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                type="email"
-                required
-                placeholder="you@domain.com"
-                style={{
-                  marginTop: 8,
-                  width: "100%",
-                  padding: "12px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(0,0,0,0.14)",
-                  background: "rgba(255,255,255,0.65)",
-                  outline: "none",
-                  fontSize: 16,
-                }}
-              />
-
-              {error ? (
-                <p style={{ marginTop: 12, color: "#7a1d1d" }}>{error}</p>
-              ) : null}
-
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  marginTop: 14,
-                  padding: "10px 14px",
-                  borderRadius: 999,
-                  border: "1px solid rgba(0,0,0,0.18)",
-                  background: "rgba(0,0,0,0.02)",
-                  cursor: loading ? "not-allowed" : "pointer",
-                  fontFamily: "inherit",
-                }}
-              >
-                {loading ? "Sending…" : "Send magic link"}
-              </button>
-            </form>
-          )}
+    <div className="w-full max-w-md">
+      <form onSubmit={onSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm mb-2">Email</label>
+          <input
+            type="email"
+            inputMode="email"
+            autoComplete="email"
+            placeholder="you@domain.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded-md border px-3 py-2 bg-transparent"
+            disabled={disabled}
+          />
         </div>
-      </div>
-    </main>
+
+        <button
+          type="submit"
+          disabled={disabled}
+          className="rounded-full border px-5 py-2 text-sm hover:opacity-80 disabled:opacity-50"
+        >
+          {status === "sending" ? "Sending..." : "Send magic link"}
+        </button>
+
+        {message ? (
+          <p className="text-sm opacity-80" aria-live="polite">
+            {message}
+          </p>
+        ) : null}
+      </form>
+
+      {status === "sent" ? (
+        <div className="mt-6 text-sm opacity-80 space-y-2">
+          <p>
+            If you don’t see it, check spam or try again in a minute.
+          </p>
+        </div>
+      ) : null}
+    </div>
   );
 }

@@ -1,52 +1,25 @@
-// src/app/auth/callback/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { supabaseServer } from "@/lib/supabase/server";
 
-type CookieToSet = {
-  name: string;
-  value: string;
-  options?: any;
-};
-
-export async function GET(req: Request) {
-  const url = new URL(req.url);
+export async function GET(request: Request) {
+  const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const redirect = url.searchParams.get("redirect") || "/dashboard";
-  const origin = url.origin;
 
   if (!code) {
-    return NextResponse.redirect(
-      `${origin}/login?redirect=${encodeURIComponent(redirect)}`
-    );
+    // No auth code present — go home
+    return NextResponse.redirect(new URL("/", url.origin));
   }
 
-  const cookieStore = await cookies();
+  const supabase = await supabaseServer();
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll(cookiesToSet: CookieToSet[]) {
-          cookiesToSet.forEach(({ name, value, options }) => {
-            cookieStore.set(name, value, options);
-          });
-        },
-      },
-    }
-  );
-
+  // This exchanges the code for a session + sets cookies
   const { error } = await supabase.auth.exchangeCodeForSession(code);
 
   if (error) {
-    return NextResponse.redirect(
-      `${origin}/login?redirect=${encodeURIComponent(redirect)}`
-    );
+    // If exchange fails, send them somewhere sane
+    return NextResponse.redirect(new URL("/?auth=error", url.origin));
   }
 
-  return NextResponse.redirect(`${origin}${redirect}`);
+  // After login, send them into onboarding (or dashboard later)
+  return NextResponse.redirect(new URL("/onboarding", url.origin));
 }
