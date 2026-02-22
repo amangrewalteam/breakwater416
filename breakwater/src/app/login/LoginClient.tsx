@@ -3,22 +3,8 @@
 import * as React from "react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
-function getOrigin() {
-  // Prefer explicit env var (best for Vercel), fall back to window.origin in browser
-  const env =
-    process.env.NEXT_PUBLIC_SITE_URL ||
-    process.env.NEXT_PUBLIC_VERCEL_URL ||
-    "";
-
-  // NEXT_PUBLIC_VERCEL_URL sometimes comes without scheme
-  if (env) {
-    if (env.startsWith("http://") || env.startsWith("https://")) return env;
-    return `https://${env}`;
-  }
-
-  if (typeof window !== "undefined") return window.location.origin;
-  return "";
-}
+// Hard-force the canonical app URL so magic links never point to vercel.app
+const CANONICAL_ORIGIN = "https://app.breakwater.finance";
 
 export default function LoginClient() {
   const [email, setEmail] = React.useState("");
@@ -41,12 +27,12 @@ export default function LoginClient() {
     setMessage("");
 
     const supabase = supabaseBrowser();
-    const origin = getOrigin();
 
     const { error } = await supabase.auth.signInWithOtp({
       email: trimmed,
       options: {
-        emailRedirectTo: `${origin}/auth/callback`,
+        // Force callback on the custom domain
+        emailRedirectTo: `${CANONICAL_ORIGIN}/auth/callback`,
       },
     });
 
@@ -92,15 +78,12 @@ export default function LoginClient() {
             {message}
           </p>
         ) : null}
-      </form>
 
-      {status === "sent" ? (
-        <div className="mt-6 text-sm opacity-80 space-y-2">
-          <p>
-            If you don’t see it, check spam or try again in a minute.
-          </p>
-        </div>
-      ) : null}
+        {/* Tiny debug line — remove later */}
+        <p className="text-xs opacity-60">
+          Redirects to: {CANONICAL_ORIGIN}/auth/callback
+        </p>
+      </form>
     </div>
   );
 }
