@@ -23,7 +23,7 @@ export async function POST() {
       user: { client_user_id: userId },
       client_name: "Breakwater",
       products: [Products.Transactions],
-      country_codes: [CountryCode.US, CountryCode.CA],
+      country_codes: [CountryCode.Us, CountryCode.Ca],
       language: "en",
     });
 
