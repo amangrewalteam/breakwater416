@@ -1,49 +1,44 @@
+// src/app/auth/callback/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase/server";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
 
+  // Supabase sends ?code=... (PKCE) or sometimes ?error=...
   const code = url.searchParams.get("code");
-  const token_hash = url.searchParams.get("token_hash");
-  const type = url.searchParams.get("type"); // e.g. "magiclink"
+  const error = url.searchParams.get("error");
+  const error_description = url.searchParams.get("error_description");
 
-  const origin = url.origin;
+  // If Supabase is telling us something went wrong, send user somewhere clean
+  if (error) {
+    const redirect = new URL("/", url.origin);
+    redirect.searchParams.set("auth", "error");
+    redirect.searchParams.set("error", error);
+    if (error_description) redirect.searchParams.set("error_description", error_description);
+    return NextResponse.redirect(redirect);
+  }
 
+  // If there's no code, nothing to exchange
+  if (!code) {
+    const redirect = new URL("/", url.origin);
+    redirect.searchParams.set("auth", "error");
+    redirect.searchParams.set("reason", "missing_code");
+    return NextResponse.redirect(redirect);
+  }
+
+  // Exchange the code for a session and set cookies
   const supabase = await supabaseServer();
+  const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
 
-  // Case 1: PKCE code flow (common in many Supabase setups)
-  if (code) {
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-
-    if (error) {
-      return NextResponse.redirect(
-        new URL(`/?auth=error&reason=${encodeURIComponent(error.message)}`, origin)
-      );
-    }
-
-    return NextResponse.redirect(new URL("/onboarding", origin));
+  if (exchangeError) {
+    const redirect = new URL("/", url.origin);
+    redirect.searchParams.set("auth", "error");
+    redirect.searchParams.set("reason", "exchange_failed");
+    redirect.searchParams.set("message", exchangeError.message);
+    return NextResponse.redirect(redirect);
   }
 
-  // Case 2: token_hash flow (magic link / OTP variants)
-  if (token_hash && type) {
-    // Supabase expects a specific union type. We cast safely.
-    const { error } = await supabase.auth.verifyOtp({
-      type: type as any,
-      token_hash,
-    });
-
-    if (error) {
-      return NextResponse.redirect(
-        new URL(`/?auth=error&reason=${encodeURIComponent(error.message)}`, origin)
-      );
-    }
-
-    return NextResponse.redirect(new URL("/onboarding", origin));
-  }
-
-  // Nothing usable on the callback URL
-  return NextResponse.redirect(
-    new URL("/?auth=error&reason=missing_params", origin)
-  );
+  // Success: send them to your intended post-login page
+  return NextResponse.redirect(new URL("/dashboard", url.origin));
 }
