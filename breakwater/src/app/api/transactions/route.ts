@@ -1,47 +1,41 @@
+// src/app/api/transactions/route.ts
 import { NextResponse } from "next/server";
-import { plaidClient } from "@/lib/plaid";
-import fs from "fs";
-import path from "path";
-
-const TOKEN_PATH = path.join(process.cwd(), ".plaid_access_token");
-
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
-}
+import { supabaseServer } from "@/lib/supabase/server";
+import { log, logError } from "@/lib/log";
 
 export async function GET() {
+  log("transactions.list.start");
   try {
-    if (!fs.existsSync(TOKEN_PATH)) {
+    const supabase = await supabaseServer();
+    const { data, error } = await supabase.auth.getUser();
+
+    if (error || !data?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const userId = data.user.id;
+
+    const { data: txns, error: txErr } = await supabase
+      .from("plaid_transactions")
+      .select(
+        "transaction_id,account_id,name,merchant_name,amount,iso_currency_code,date,authorized_date,pending,category"
+      )
+      .eq("user_id", userId)
+      .order("date", { ascending: false })
+      .limit(250);
+
+    if (txErr) {
+      logError("transactions.list.db_err", txErr, { userId });
       return NextResponse.json(
-        { error: "No access token yet. Connect a bank first." },
-        { status: 401 }
+        { error: "Failed to fetch transactions" },
+        { status: 500 }
       );
     }
 
-    const access_token = fs.readFileSync(TOKEN_PATH, "utf8").trim();
-    if (!access_token) {
-      return NextResponse.json(
-        { error: "Access token file is empty. Reconnect bank." },
-        { status: 401 }
-      );
-    }
-
-    const end_date = todayISO();
-    const start_date = "2024-01-01";
-
-    const resp = await plaidClient.transactionsGet({
-      access_token,
-      start_date,
-      end_date,
-      options: {
-        count: 250,
-        offset: 0,
-      },
-    });
-
-    return NextResponse.json(resp.data.transactions);
+    log("transactions.list.ok", { userId, count: txns?.length ?? 0 });
+    return NextResponse.json(txns ?? []);
   } catch (e: any) {
-    console.error("transactions error:", e?.response?.data || e);
+    logError("transactions.list.err", e);
     return NextResponse.json(
       { error: "Failed to fetch transactions" },
       { status: 500 }
