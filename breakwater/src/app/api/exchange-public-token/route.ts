@@ -4,6 +4,9 @@ import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
 import { log, logError } from "@/lib/log";
 
+// CRITICAL: Plaid SDK requires Node runtime (not Edge)
+export const runtime = "nodejs";
+
 type Body = {
   public_token?: string;
   institution_name?: string | null;
@@ -31,13 +34,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing public_token" }, { status: 400 });
     }
 
-    const exchange = await plaidClient.itemPublicTokenExchange({ public_token });
+    // 🔁 Exchange public_token → access_token
+    const exchange = await plaidClient.itemPublicTokenExchange({
+      public_token,
+    });
 
     const access_token = exchange.data.access_token;
     const item_id = exchange.data.item_id;
 
-    // Store item + access_token (NOTE: Phase 3.2 will encrypt; for now store as-is)
-    const upsertResp = await supabase
+    // 💾 Upsert into Supabase
+    const { error: dbError } = await supabase
       .from("plaid_items")
       .upsert(
         {
@@ -48,14 +54,14 @@ export async function POST(req: Request) {
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id,item_id" }
-      )
-      .select("item_id")
-      .maybeSingle();
+      );
 
-    if (upsertResp.error) {
+    if (dbError) {
+      console.error("Supabase upsert error:", dbError);
       log("plaid.exchange.db_error", { userId, itemId: item_id });
+
       return NextResponse.json(
-        { error: "Failed to save Plaid item" },
+        { error: dbError.message || "Failed to save Plaid item" },
         { status: 500 }
       );
     }
@@ -64,9 +70,22 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ item_id });
   } catch (e: any) {
-    logError("plaid.exchange.err", e);
+    const plaid = e?.response?.data;
+
+    console.error("PLAID exchange error:", plaid || e);
+
+    logError("plaid.exchange.err", e, {
+      plaid_error_code: plaid?.error_code,
+      plaid_error_message: plaid?.error_message,
+    });
+
     return NextResponse.json(
-      { error: "Failed to exchange public token" },
+      {
+        error:
+          plaid?.error_message ||
+          e?.message ||
+          "Failed to exchange public token",
+      },
       { status: 500 }
     );
   }
