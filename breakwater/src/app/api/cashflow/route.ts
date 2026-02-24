@@ -59,7 +59,8 @@ export async function GET(req: Request) {
 
     // Model: monthly = full amount each month; yearly spread evenly across 12 months.
     for (const s of confirmed) {
-      const amount = Number(s.amount || 0);
+      // amount_cents is stored as integer cents; convert to dollars
+      const amount = Number(s.amount_cents || 0) / 100;
       const cadence = String(s.cadence || "monthly");
       const category = s.category ? String(s.category) : "Uncategorized";
 

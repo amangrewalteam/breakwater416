@@ -2,7 +2,14 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PROTECTED_PREFIXES = ["/dashboard", "/connect", "/manage"];
+const PROTECTED_PREFIXES = [
+  "/dashboard",
+  "/connect",
+  "/manage",
+  "/cards",
+  "/subscriptions",
+  "/onboarding",
+];
 
 export async function middleware(req: NextRequest) {
   // Start with a passthrough response that carries the current request headers.
@@ -57,5 +64,12 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/connect/:path*", "/manage/:path*"],
+  matcher: [
+    "/dashboard/:path*",
+    "/connect/:path*",
+    "/manage/:path*",
+    "/cards/:path*",
+    "/subscriptions/:path*",
+    "/onboarding/:path*",
+  ],
 };
