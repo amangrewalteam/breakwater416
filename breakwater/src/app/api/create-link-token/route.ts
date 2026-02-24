@@ -5,20 +5,25 @@ import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
 import { log, logError } from "@/lib/log";
 
+// Ensure this route always runs on Node (Plaid SDK expects Node APIs)
+export const runtime = "nodejs";
+
 export async function POST() {
   log("plaid.link_token.start");
 
   try {
+    // Auth gate: only signed-in users can create a Link token
     const supabase = await supabaseServer();
     const { data, error } = await supabase.auth.getUser();
 
     if (error || !data?.user) {
-      log("plaid.link_token.unauthorized");
+      log("plaid.link_token.unauthorized", { error: error?.message });
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const userId = data.user.id;
 
+    // Create link token (no redirect_uri needed for popup Link in web MVP)
     const resp = await plaidClient.linkTokenCreate({
       user: { client_user_id: userId },
       client_name: "Breakwater",
@@ -31,7 +36,8 @@ export async function POST() {
     return NextResponse.json({ link_token: resp.data.link_token });
   } catch (e: any) {
     const plaid = e?.response?.data;
-    // This is the important part: shows error_code + error_message in Vercel logs
+
+    // Loud console for Vercel logs
     console.error("PLAID linkTokenCreate error:", plaid || e);
 
     logError("plaid.link_token.err", e, {
@@ -41,7 +47,13 @@ export async function POST() {
     });
 
     return NextResponse.json(
-      { error: plaid?.error_message || e?.message || "Failed to create link token" },
+      {
+        error:
+          plaid?.error_message ||
+          e?.message ||
+          "Failed to create link token",
+        plaid_error_code: plaid?.error_code,
+      },
       { status: 500 }
     );
   }
