@@ -33,43 +33,42 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing public_token" }, { status: 400 });
     }
 
+    // Exchange public_token → access_token
     const exchange = await plaidClient.itemPublicTokenExchange({ public_token });
+
     const access_token = exchange.data.access_token;
     const item_id = exchange.data.item_id;
 
-    const upsert = await supabase
-      .from("plaid_items")
-      .upsert(
-        {
-          user_id: userId,
-          item_id,
-          access_token_enc: access_token,
-          institution_name: body.institution_name ?? null,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id,item_id" }
-      )
-      .select("item_id")
-      .maybeSingle();
+    // Upsert WITHOUT selecting back (avoids RLS/select edge cases)
+    const { error: dbError } = await supabase.from("plaid_items").upsert(
+      {
+        user_id: userId,
+        item_id,
+        access_token_enc: access_token,
+        institution_name: body.institution_name ?? null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,item_id" }
+    );
 
-    if (upsert.error) {
-      console.error("Supabase upsert error:", upsert.error);
+    if (dbError) {
+      console.error("Supabase upsert error:", dbError);
 
       log("plaid.exchange.db_error", {
         userId,
         itemId: item_id,
-        db_code: upsert.error.code,
-        db_message: upsert.error.message,
-        db_details: upsert.error.details,
-        db_hint: upsert.error.hint,
+        db_code: dbError.code,
+        db_message: dbError.message,
+        db_details: dbError.details,
+        db_hint: dbError.hint,
       });
 
       return NextResponse.json(
         {
-          error: upsert.error.message || "Failed to save Plaid item",
-          code: upsert.error.code,
-          details: upsert.error.details,
-          hint: upsert.error.hint,
+          error: dbError.message || "Failed to save Plaid item",
+          code: dbError.code,
+          details: dbError.details,
+          hint: dbError.hint,
         },
         { status: 500 }
       );
