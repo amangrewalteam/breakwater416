@@ -4,7 +4,6 @@ import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
 import { log, logError } from "@/lib/log";
 
-// CRITICAL: Plaid SDK requires Node runtime (not Edge)
 export const runtime = "nodejs";
 
 type Body = {
@@ -20,7 +19,7 @@ export async function POST(req: Request) {
     const { data, error } = await supabase.auth.getUser();
 
     if (error || !data?.user) {
-      log("plaid.exchange.unauthorized");
+      log("plaid.exchange.unauthorized", { error: error?.message });
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -34,16 +33,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing public_token" }, { status: 400 });
     }
 
-    // 🔁 Exchange public_token → access_token
-    const exchange = await plaidClient.itemPublicTokenExchange({
-      public_token,
-    });
-
+    const exchange = await plaidClient.itemPublicTokenExchange({ public_token });
     const access_token = exchange.data.access_token;
     const item_id = exchange.data.item_id;
 
-    // 💾 Upsert into Supabase
-    const { error: dbError } = await supabase
+    const upsert = await supabase
       .from("plaid_items")
       .upsert(
         {
@@ -54,24 +48,37 @@ export async function POST(req: Request) {
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id,item_id" }
-      );
+      )
+      .select("item_id")
+      .maybeSingle();
 
-    if (dbError) {
-      console.error("Supabase upsert error:", dbError);
-      log("plaid.exchange.db_error", { userId, itemId: item_id });
+    if (upsert.error) {
+      console.error("Supabase upsert error:", upsert.error);
+
+      log("plaid.exchange.db_error", {
+        userId,
+        itemId: item_id,
+        db_code: upsert.error.code,
+        db_message: upsert.error.message,
+        db_details: upsert.error.details,
+        db_hint: upsert.error.hint,
+      });
 
       return NextResponse.json(
-        { error: dbError.message || "Failed to save Plaid item" },
+        {
+          error: upsert.error.message || "Failed to save Plaid item",
+          code: upsert.error.code,
+          details: upsert.error.details,
+          hint: upsert.error.hint,
+        },
         { status: 500 }
       );
     }
 
     log("plaid.exchange.ok", { userId, itemId: item_id });
-
     return NextResponse.json({ item_id });
   } catch (e: any) {
     const plaid = e?.response?.data;
-
     console.error("PLAID exchange error:", plaid || e);
 
     logError("plaid.exchange.err", e, {
