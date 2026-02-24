@@ -1,5 +1,5 @@
 // src/middleware.ts
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 const PROTECTED_PREFIXES = ["/dashboard", "/connect", "/manage"];
@@ -21,7 +21,7 @@ export async function middleware(req: NextRequest) {
         // We must write the new tokens into BOTH the request (so the client
         // can read them in the same middleware pass) AND the response (so
         // the browser receives the updated cookies).
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
           cookiesToSet.forEach(({ name, value }) => req.cookies.set(name, value));
           response = NextResponse.next({ request: req });
           cookiesToSet.forEach(({ name, value, options }) =>
