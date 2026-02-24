@@ -3,8 +3,12 @@
 import * as React from "react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
-// Hard-force the canonical app URL so magic links never point to vercel.app
-const CANONICAL_ORIGIN = "https://app.breakwater.finance";
+// Use the env var so this works correctly in every Vercel environment
+// (production, preview, local). Set NEXT_PUBLIC_APP_URL in Vercel dashboard
+// to https://app.breakwater.finance for all production deployments.
+const APP_ORIGIN =
+  process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ??
+  (typeof window !== "undefined" ? window.location.origin : "");
 
 export default function LoginClient() {
   const [email, setEmail] = React.useState("");
@@ -31,8 +35,7 @@ export default function LoginClient() {
     const { error } = await supabase.auth.signInWithOtp({
       email: trimmed,
       options: {
-        // Force callback on the custom domain
-        emailRedirectTo: `${CANONICAL_ORIGIN}/auth/callback`,
+        emailRedirectTo: `${APP_ORIGIN}/auth/callback`,
       },
     });
 
@@ -78,11 +81,6 @@ export default function LoginClient() {
             {message}
           </p>
         ) : null}
-
-        {/* Tiny debug line — remove later */}
-        <p className="text-xs opacity-60">
-          Redirects to: {CANONICAL_ORIGIN}/auth/callback
-        </p>
       </form>
     </div>
   );
