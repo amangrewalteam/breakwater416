@@ -5,14 +5,12 @@ import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
 import { log, logError } from "@/lib/log";
 
-// Ensure this route always runs on Node (Plaid SDK expects Node APIs)
 export const runtime = "nodejs";
 
 export async function POST() {
   log("plaid.link_token.start");
 
   try {
-    // Auth gate: only signed-in users can create a Link token
     const supabase = await supabaseServer();
     const { data, error } = await supabase.auth.getUser();
 
@@ -23,21 +21,31 @@ export async function POST() {
 
     const userId = data.user.id;
 
-    // Create link token (no redirect_uri needed for popup Link in web MVP)
+    // If you are using any OAuth institutions, this must be configured in Plaid Dashboard
+    // and should match the environment domain exactly.
+    const redirectUri = process.env.PLAID_REDIRECT_URI || undefined;
+
     const resp = await plaidClient.linkTokenCreate({
       user: { client_user_id: userId },
       client_name: "Breakwater",
       products: [Products.Transactions],
+
+      // IMPORTANT: include CA if you might connect Canadian institutions
       country_codes: [CountryCode.Us, CountryCode.Ca],
+
       language: "en",
+
+      // Safe to include; required for many OAuth institutions
+      ...(redirectUri ? { redirect_uri: redirectUri } : {}),
+
+      // Optional but helpful later
+      // webhook: process.env.PLAID_WEBHOOK_URL,
     });
 
-    log("plaid.link_token.ok", { userId });
+    log("plaid.link_token.ok", { userId, hasRedirect: !!redirectUri });
     return NextResponse.json({ link_token: resp.data.link_token });
   } catch (e: any) {
     const plaid = e?.response?.data;
-
-    // Loud console for Vercel logs
     console.error("PLAID linkTokenCreate error:", plaid || e);
 
     logError("plaid.link_token.err", e, {
@@ -48,10 +56,7 @@ export async function POST() {
 
     return NextResponse.json(
       {
-        error:
-          plaid?.error_message ||
-          e?.message ||
-          "Failed to create link token",
+        error: plaid?.error_message || e?.message || "Failed to create link token",
         plaid_error_code: plaid?.error_code,
       },
       { status: 500 }
