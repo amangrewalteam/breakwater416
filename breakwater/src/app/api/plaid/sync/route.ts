@@ -4,46 +4,138 @@ import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
 import { log, logError } from "@/lib/log";
 
-type PlaidItemRow = {
-  id?: string;
-  user_id: string;
-  item_id: string;
-  // Your schema may have one or more of these:
-  access_token?: string | null;
-  access_token_enc?: string | null;
-  access_token_?: string | null; // (seen as "access_token_" in Supabase UI)
+// Ensure this route always runs on Node (Plaid SDK expects Node APIs)
+export const runtime = "nodejs";
+// Avoid any caching surprises
+export const dynamic = "force-dynamic";
+
+type PlaidItemRow = Record<string, any> & {
+  user_id?: string;
+  item_id?: string;
   cursor?: string | null;
   institution_name?: string | null;
-  updated_at?: string | null;
+  access_token?: string | null;
+  access_token_enc?: string | null;
+  access_token_?: string | null; // sometimes present in UI
 };
 
 function getAccessToken(item: PlaidItemRow) {
   return (
     item.access_token_enc ??
-    // some schemas ended up with a truncated/odd column name in UI
-    (item as any).access_token_ ??
+    item.access_token_ ??
     item.access_token ??
+    (item as any)["access_token_"] ??
     null
   );
 }
 
+/**
+ * Update plaid_items cursor safely even if updated_at doesn't exist.
+ */
+async function safeUpdateCursor(
+  supabase: Awaited<ReturnType<typeof supabaseServer>>,
+  userId: string,
+  itemId: string,
+  nextCursor: string
+) {
+  // Try with updated_at first, then retry without it if schema doesn't have it.
+  const withUpdatedAt = await supabase
+    .from("plaid_items")
+    .update({
+      cursor: nextCursor,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("user_id", userId)
+    .eq("item_id", itemId);
+
+  if (!withUpdatedAt.error) return;
+
+  // Retry without updated_at (covers schema-cache + missing column scenarios)
+  const withoutUpdatedAt = await supabase
+    .from("plaid_items")
+    .update({ cursor: nextCursor })
+    .eq("user_id", userId)
+    .eq("item_id", itemId);
+
+  if (withoutUpdatedAt.error) {
+    logError("plaid.sync.cursor_update_err", withoutUpdatedAt.error, {
+      userId,
+      itemId,
+    });
+  }
+}
+
+/**
+ * Try upserting transactions into whatever table/schema exists.
+ * We attempt multiple table names and multiple row "shapes" to match your DB.
+ */
 async function tryUpsertTransactions(
   supabase: Awaited<ReturnType<typeof supabaseServer>>,
   rows: any[]
 ) {
   if (!rows.length) return { inserted: 0, table: null as string | null };
 
-  // Try common table names (keep this flexible so we don’t brick the sync).
-  const candidates = ["transactions", "plaid_transactions"];
+  const tables = ["transactions", "plaid_transactions"];
+
+  // Different schemas across branches commonly differ on:
+  // - amount vs amount_cents
+  // - raw (jsonb) presence
+  // - created_at/updated_at presence
+  const shapes = [
+    // Shape A: richer
+    (r: any) => ({
+      user_id: r.user_id,
+      item_id: r.item_id,
+      transaction_id: r.transaction_id,
+      name: r.name,
+      merchant_name: r.merchant_name,
+      amount_cents: r.amount_cents,
+      iso_currency_code: r.iso_currency_code,
+      date: r.date,
+      authorized_date: r.authorized_date,
+      pending: r.pending,
+      raw: r.raw,
+      updated_at: r.updated_at,
+    }),
+    // Shape B: amount (not cents)
+    (r: any) => ({
+      user_id: r.user_id,
+      item_id: r.item_id,
+      transaction_id: r.transaction_id,
+      name: r.name,
+      merchant_name: r.merchant_name,
+      amount: typeof r.amount_cents === "number" ? r.amount_cents / 100 : null,
+      iso_currency_code: r.iso_currency_code,
+      date: r.date,
+      pending: r.pending,
+      raw: r.raw,
+    }),
+    // Shape C: minimal
+    (r: any) => ({
+      user_id: r.user_id,
+      item_id: r.item_id,
+      transaction_id: r.transaction_id,
+      name: r.name,
+      amount: typeof r.amount_cents === "number" ? r.amount_cents / 100 : null,
+      date: r.date,
+      pending: r.pending,
+    }),
+  ];
 
   let lastErr: any = null;
-  for (const table of candidates) {
-    const resp = await supabase.from(table).upsert(rows, {
-      onConflict: "user_id,transaction_id",
-    });
 
-    if (!resp.error) return { inserted: rows.length, table };
-    lastErr = resp.error;
+  for (const table of tables) {
+    for (const shape of shapes) {
+      const shaped = rows.map(shape);
+
+      const resp = await supabase.from(table).upsert(shaped, {
+        onConflict: "user_id,transaction_id",
+      });
+
+      if (!resp.error) return { inserted: shaped.length, table };
+
+      lastErr = resp.error;
+    }
   }
 
   // If neither table exists / schema mismatch, don’t hard-fail sync.
@@ -51,7 +143,8 @@ async function tryUpsertTransactions(
     reason: "no_matching_table_or_schema",
     error: lastErr?.message ?? String(lastErr),
   });
-  return { inserted: 0, table: null };
+
+  return { inserted: 0, table: null as string | null };
 }
 
 export async function POST() {
@@ -68,18 +161,22 @@ export async function POST() {
 
     const userId = data.user.id;
 
-    // Load Plaid items for this user
+    // IMPORTANT: select("*") avoids hard-failing if your schema differs
+    // (e.g., updated_at missing, access_token_ weirdness, etc.)
     const itemsResp = await supabase
       .from("plaid_items")
-      .select(
-        "id,user_id,item_id,access_token,access_token_enc,access_token_,cursor,institution_name,updated_at"
-      )
+      .select("*")
       .eq("user_id", userId);
 
     if (itemsResp.error) {
-      logError("plaid.sync.load_items_err", itemsResp.error);
+      logError("plaid.sync.load_items_err", itemsResp.error, { userId });
+
+      // Return the actual DB error so you can see if it's RLS or schema/cache.
       return NextResponse.json(
-        { error: "Failed to load plaid items" },
+        {
+          error: "Failed to load plaid items",
+          details: itemsResp.error.message,
+        },
         { status: 500 }
       );
     }
@@ -104,30 +201,35 @@ export async function POST() {
     let totalModified = 0;
     let totalRemoved = 0;
     let totalInserted = 0;
+    let missingTokenCount = 0;
 
     for (const item of items) {
+      const itemId = item.item_id;
+
+      if (!itemId) continue;
+
       const accessToken = getAccessToken(item);
 
       if (!accessToken) {
-        // This is the exact issue you’re seeing: token exists in a different column.
+        missingTokenCount += 1;
         log("plaid.sync.missing_access_token", {
           userId,
-          itemId: item.item_id,
+          itemId,
+          keys: Object.keys(item),
           has_access_token: !!item.access_token,
           has_access_token_enc: !!item.access_token_enc,
-          has_access_token_: !!(item as any).access_token_,
+          has_access_token_: !!item.access_token_,
         });
         continue;
       }
 
       const cursor = item.cursor ?? undefined;
 
-      log("plaid.sync.item.start", { userId, itemId: item.item_id });
+      log("plaid.sync.item.start", { userId, itemId });
 
       const syncResp = await plaidClient.transactionsSync({
         access_token: accessToken,
         cursor,
-        // keep light; you can raise later
         count: 500,
       });
 
@@ -137,32 +239,15 @@ export async function POST() {
       totalModified += modified.length;
       totalRemoved += removed.length;
 
-      // Persist cursor back to plaid_items
-      const cursorUpdate = await supabase
-        .from("plaid_items")
-        .update({
-          cursor: next_cursor,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("user_id", userId)
-        .eq("item_id", item.item_id);
+      await safeUpdateCursor(supabase, userId, itemId, next_cursor);
 
-      if (cursorUpdate.error) {
-        logError("plaid.sync.cursor_update_err", cursorUpdate.error, {
-          userId,
-          itemId: item.item_id,
-        });
-        // don’t fail the whole sync for one cursor update
-      }
-
-      // Prepare transaction rows for DB (best-effort)
-      const txRows = added.map((t: any) => {
+      const toRow = (t: any) => {
         const amountCents =
           typeof t.amount === "number" ? Math.round(t.amount * 100) : null;
 
         return {
           user_id: userId,
-          item_id: item.item_id,
+          item_id: itemId,
           transaction_id: t.transaction_id,
           name: t.name ?? null,
           merchant_name: t.merchant_name ?? null,
@@ -171,28 +256,27 @@ export async function POST() {
           date: t.date ?? null,
           authorized_date: t.authorized_date ?? null,
           pending: !!t.pending,
-          // keep raw for now; you can normalize later
           raw: t,
           updated_at: new Date().toISOString(),
         };
-      });
+      };
 
-      const upsertResult = await tryUpsertTransactions(supabase, txRows);
-      totalInserted += upsertResult.inserted;
+      const firstRows = added.map(toRow);
+      const firstUpsert = await tryUpsertTransactions(supabase, firstRows);
+      totalInserted += firstUpsert.inserted;
 
       log("plaid.sync.item.ok", {
         userId,
-        itemId: item.item_id,
+        itemId,
         added: added.length,
         modified: modified.length,
         removed: removed.length,
-        inserted: upsertResult.inserted,
-        inserted_table: upsertResult.table,
+        inserted: firstUpsert.inserted,
+        inserted_table: firstUpsert.table,
         has_more,
       });
 
-      // If Plaid says more pages exist, loop once more (lightweight),
-      // or just let next manual sync pick it up. We’ll do a small loop.
+      // If more pages exist, loop a few times
       let safety = 0;
       let currentCursor = next_cursor;
       let more = has_more;
@@ -214,47 +298,21 @@ export async function POST() {
         totalModified += moreData.modified.length;
         totalRemoved += moreData.removed.length;
 
-        const moreRows = moreData.added.map((t: any) => {
-          const amountCents =
-            typeof t.amount === "number" ? Math.round(t.amount * 100) : null;
+        await safeUpdateCursor(supabase, userId, itemId, currentCursor);
 
-          return {
-            user_id: userId,
-            item_id: item.item_id,
-            transaction_id: t.transaction_id,
-            name: t.name ?? null,
-            merchant_name: t.merchant_name ?? null,
-            amount_cents: amountCents,
-            iso_currency_code: t.iso_currency_code ?? null,
-            date: t.date ?? null,
-            authorized_date: t.authorized_date ?? null,
-            pending: !!t.pending,
-            raw: t,
-            updated_at: new Date().toISOString(),
-          };
-        });
-
+        const moreRows = moreData.added.map(toRow);
         const moreUpsert = await tryUpsertTransactions(supabase, moreRows);
         totalInserted += moreUpsert.inserted;
 
-        // persist cursor each loop
-        await supabase
-          .from("plaid_items")
-          .update({
-            cursor: currentCursor,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("user_id", userId)
-          .eq("item_id", item.item_id);
-
         log("plaid.sync.item.page", {
           userId,
-          itemId: item.item_id,
+          itemId,
           page: safety + 1,
           added: moreData.added.length,
           modified: moreData.modified.length,
           removed: moreData.removed.length,
           inserted: moreUpsert.inserted,
+          inserted_table: moreUpsert.table,
           has_more: more,
         });
       }
@@ -263,6 +321,7 @@ export async function POST() {
     log("plaid.sync.ok", {
       userId,
       items: items.length,
+      missingTokenCount,
       added: totalAdded,
       modified: totalModified,
       removed: totalRemoved,
@@ -273,13 +332,13 @@ export async function POST() {
       ok: true,
       userId,
       items: items.length,
+      missingTokenCount,
       added: totalAdded,
       modified: totalModified,
       removed: totalRemoved,
       inserted: totalInserted,
     });
   } catch (e: any) {
-    // If Plaid errors, surface their error_code/message in logs
     const plaid = e?.response?.data;
     console.error("PLAID sync error:", plaid || e);
 
@@ -290,7 +349,10 @@ export async function POST() {
     });
 
     return NextResponse.json(
-      { error: plaid?.error_message || e?.message || "Failed to sync Plaid" },
+      {
+        error: plaid?.error_message || e?.message || "Failed to sync Plaid",
+        plaid_error_code: plaid?.error_code,
+      },
       { status: 500 }
     );
   }
