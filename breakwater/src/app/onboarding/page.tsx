@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useEffect, useState } from "react";
 import Shell from "@/components/Shell";
 import PlaidConnectButton from "@/components/PlaidConnectButton";
@@ -9,7 +11,6 @@ import { useRouter } from "next/navigation";
 
 export default function OnboardingPage() {
   const router = useRouter();
-  const supabase = supabaseBrowser();
 
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
@@ -19,7 +20,7 @@ export default function OnboardingPage() {
 
     (async () => {
       try {
-        const { data } = await supabase.auth.getUser();
+        const { data } = await supabaseBrowser().auth.getUser();
 
         if (!alive) return;
 
@@ -38,7 +39,7 @@ export default function OnboardingPage() {
     return () => {
       alive = false;
     };
-  }, [router, supabase]);
+  }, [router]);
 
   async function afterConnected() {
     // Sync transactions + compute recurring, then go dashboard
@@ -52,11 +53,11 @@ export default function OnboardingPage() {
   return (
     <Shell
       title="Settle in"
-      subtitle="Connect once. We’ll surface what returns."
+      subtitle="Connect once. We'll surface what returns."
       right={
         <button
           onClick={async () => {
-            await supabase.auth.signOut();
+            await supabaseBrowser().auth.signOut();
             router.replace("/");
           }}
           style={{
