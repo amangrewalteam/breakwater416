@@ -7,13 +7,13 @@ import type {
   AccountBase,
 } from "plaid";
 import { plaidClient } from "@/lib/plaid";
-import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseServer } from "@/lib/supabase/server";
 
-// If you’re on Vercel / edge by default, keep this on Node for Plaid + server libs.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type JsonRecord = Record<string, unknown>;
+type RemovedTx = { transaction_id: string };
 
 function jsonError(message: string, status = 400, extra?: JsonRecord) {
   return NextResponse.json({ ok: false, error: message, ...(extra ?? {}) }, { status });
@@ -31,15 +31,16 @@ function getNumber(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
+/**
+ * Map Plaid transaction -> DB row
+ * Adjust columns to match your schema if needed.
+ */
 function mapTransactionRow(userId: string, itemId: string, t: Transaction) {
   return {
     user_id: userId,
     item_id: itemId,
-
-    // Stable unique key from Plaid:
     transaction_id: t.transaction_id,
 
-    // Useful fields:
     account_id: t.account_id,
     name: t.name ?? null,
     merchant_name: t.merchant_name ?? null,
@@ -47,29 +48,25 @@ function mapTransactionRow(userId: string, itemId: string, t: Transaction) {
     iso_currency_code: t.iso_currency_code ?? null,
     unofficial_currency_code: t.unofficial_currency_code ?? null,
 
-    // Dates (Plaid returns strings like "2024-01-31")
     date: t.date,
     authorized_date: t.authorized_date ?? null,
 
-    // Categories (optional)
     category_id: t.category_id ?? null,
     category: Array.isArray(t.category) ? t.category : null,
 
-    // Pending & type
     pending: t.pending,
     transaction_type: t.transaction_type ?? null,
-
-    // For debugging / future-proofing (optional)
     payment_channel: t.payment_channel ?? null,
 
-    // Timestamps
     updated_at: new Date().toISOString(),
   };
 }
 
+/**
+ * Map Plaid account -> DB row
+ * If you want balances, switch to importing `Account` (not AccountBase) and map balances.
+ */
 function mapAccountRow(userId: string, itemId: string, a: AccountBase) {
-  // Note: AccountBase has balances? In Plaid SDK, "AccountBase" is the shared base.
-  // If you need balances, switch to type "Account" from plaid.
   return {
     user_id: userId,
     item_id: itemId,
@@ -84,10 +81,9 @@ function mapAccountRow(userId: string, itemId: string, a: AccountBase) {
 }
 
 /**
- * Expected DB tables (you can rename, just update queries):
- * - plaid_items: { user_id, item_id, access_token, cursor }
- * - plaid_accounts: { user_id, item_id, account_id, name, ... }
- * - plaid_transactions: { user_id, item_id, transaction_id, ... }
+ * POST /api/plaid/sync
+ * Body (optional):
+ *   { full?: boolean, maxPages?: number }
  */
 export async function POST(req: Request) {
   const supabase = await supabaseServer();
@@ -100,11 +96,6 @@ export async function POST(req: Request) {
   if (authErr) return jsonError("Auth error", 401, { detail: authErr.message });
   if (!user) return jsonError("Unauthorized", 401);
 
-  // Optional body options:
-  // {
-  //   "full": boolean,         // if true, ignores stored cursors and re-syncs from scratch (cursor = undefined)
-  //   "maxPages": number       // cap pagination loops (safety)
-  // }
   let body: JsonRecord = {};
   try {
     const maybeJson = await req.json().catch(() => ({}));
@@ -116,7 +107,6 @@ export async function POST(req: Request) {
   const full = getBool(body.full, false);
   const maxPages = Math.max(1, Math.min(50, getNumber(body.maxPages, 25)));
 
-  // Fetch all items for this user
   const { data: items, error: itemsErr } = await supabase
     .from("plaid_items")
     .select("item_id, access_token, cursor")
@@ -124,7 +114,7 @@ export async function POST(req: Request) {
 
   if (itemsErr) return jsonError("Failed to load Plaid items", 500, { detail: itemsErr.message });
   if (!items || items.length === 0) {
-    return NextResponse.json({ ok: true, synced: 0, items: 0 });
+    return NextResponse.json({ ok: true, items: 0, added: 0, modified: 0, removed: 0 });
   }
 
   let totalAdded = 0;
@@ -135,22 +125,21 @@ export async function POST(req: Request) {
     const itemId = String(item.item_id);
     const accessToken = String(item.access_token);
 
-    let cursor: string | undefined = full ? undefined : (item.cursor ? String(item.cursor) : undefined);
+    let cursor: string | undefined = full ? undefined : item.cursor ? String(item.cursor) : undefined;
     let hasMore = true;
 
-    let accounts: TransactionsSyncResponse["accounts"] = [];
+    // NOTE: Some Plaid SDK typings omit `accounts` on TransactionsSyncResponse in certain versions.
+    // We'll treat it as runtime-optional but keep TS-safe types here.
+    let accounts: AccountBase[] = [];
     const added: Transaction[] = [];
     const modified: Transaction[] = [];
-    const removed: TransactionsSyncResponse["removed"] = [];
+    const removed: RemovedTx[] = [];
 
     let page = 0;
 
     while (hasMore) {
       page += 1;
-      if (page > maxPages) {
-        // Safety valve: avoid infinite loops in case of unexpected API behavior.
-        break;
-      }
+      if (page > maxPages) break; // safety valve
 
       const request: TransactionsSyncRequest = {
         access_token: accessToken,
@@ -162,25 +151,26 @@ export async function POST(req: Request) {
       try {
         resp = await plaidClient.transactionsSync(request);
       } catch (e: unknown) {
-        // Best-effort: if one item fails, continue with others.
-        const msg =
-          e instanceof Error ? e.message : "Plaid transactionsSync failed";
-        // Optionally: you could mark item as errored in DB here.
+        const msg = e instanceof Error ? e.message : "Plaid transactionsSync failed";
         return jsonError("Plaid sync failed", 502, { detail: msg, item_id: itemId });
       }
 
       const data = resp.data;
 
-      accounts = data.accounts ?? accounts;
-      added.push(...(data.added ?? []));
-      modified.push(...(data.modified ?? []));
-      removed.push(...(data.removed ?? []));
+      // --- Runtime-safe extraction (TS-safe) ---
+      const runtimeAccounts = (data as unknown as { accounts?: AccountBase[] }).accounts;
+      if (Array.isArray(runtimeAccounts)) accounts = runtimeAccounts;
+
+      added.push(...(((data as unknown as { added?: Transaction[] }).added) ?? []));
+      modified.push(...(((data as unknown as { modified?: Transaction[] }).modified) ?? []));
+      removed.push(...(((data as unknown as { removed?: RemovedTx[] }).removed) ?? []));
+      // ----------------------------------------
 
       cursor = data.next_cursor;
       hasMore = Boolean(data.has_more);
     }
 
-    // Upsert accounts (optional but usually helpful)
+    // Upsert accounts (optional)
     if (accounts.length > 0) {
       const accountRows = accounts.map((a) => mapAccountRow(user.id, itemId, a));
       const { error: acctUpsertErr } = await supabase
@@ -195,7 +185,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // Upsert added + modified transactions
+    // Upsert transactions (added + modified)
     const txRows = [...added, ...modified].map((t) => mapTransactionRow(user.id, itemId, t));
     if (txRows.length > 0) {
       const { error: txUpsertErr } = await supabase
@@ -232,7 +222,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // Persist cursor for this item (unless full=true but we still want the latest cursor)
+    // Persist cursor
     const { error: cursorErr } = await supabase
       .from("plaid_items")
       .update({ cursor: cursor ?? null, updated_at: new Date().toISOString() })
@@ -240,7 +230,10 @@ export async function POST(req: Request) {
       .eq("item_id", itemId);
 
     if (cursorErr) {
-      return jsonError("Failed to update cursor", 500, { detail: cursorErr.message, item_id: itemId });
+      return jsonError("Failed to update cursor", 500, {
+        detail: cursorErr.message,
+        item_id: itemId,
+      });
     }
 
     totalAdded += added.length;
