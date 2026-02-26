@@ -1,13 +1,10 @@
-// src/lib/supabase/server.ts
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
-// Keep this loose to avoid Next's ReadonlyRequestCookies typing issues in build.
-// Runtime still supports setting cookies inside route handlers.
 type CookieToSet = {
   name: string;
   value: string;
-  options?: any;
+  options?: Record<string, any>;
 };
 
 export async function supabaseServer() {
@@ -28,11 +25,10 @@ export async function supabaseServer() {
       setAll(cookiesToSet: CookieToSet[]) {
         try {
           cookiesToSet.forEach(({ name, value, options }) => {
-            // Typecast because Next's cookie types are readonly in TS, but mutable at runtime in route handlers.
-            (cookieStore as any).set(name, value, options);
+            cookieStore.set(name, value, options);
           });
         } catch {
-          // Ignore if called in a context where cookies are not mutable.
+          // ignore in read-only contexts
         }
       },
     },
