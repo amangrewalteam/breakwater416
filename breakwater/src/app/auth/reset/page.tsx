@@ -1,6 +1,8 @@
 // src/app/auth/reset/page.tsx
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
@@ -15,11 +17,10 @@ export default function AuthResetPage() {
   const router = useRouter();
 
   useEffect(() => {
-    // Read next from the URL without useSearchParams (avoids Suspense/prerender issues)
     const params = new URLSearchParams(window.location.search);
     const next = safeNextPath(params.get("next"));
 
-    // 1) Clear Supabase localStorage keys (PKCE verifier often lives here)
+    // Clear Supabase localStorage keys (PKCE verifier often lives here)
     try {
       const keys = Object.keys(window.localStorage);
       for (const k of keys) {
@@ -29,7 +30,6 @@ export default function AuthResetPage() {
       }
     } catch {}
 
-    // 2) Best-effort sign out (clears client state; server cookies are handled by callback)
     (async () => {
       try {
         const supabase = supabaseBrowser();
