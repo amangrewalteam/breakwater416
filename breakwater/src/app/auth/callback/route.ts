@@ -1,27 +1,44 @@
-// src/app/auth/callback/route.ts
-import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 
-export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const code = url.searchParams.get("code");
-  const next = url.searchParams.get("next") ?? "/dashboard";
+export async function GET(req: NextRequest) {
+  const { searchParams, origin } = new URL(req.url);
+  const code = searchParams.get("code");
+  const next = searchParams.get("next") ?? "/dashboard";
 
   if (!code) {
-    return NextResponse.redirect(new URL("/?auth=error&reason=missing_code", url.origin));
+    return NextResponse.redirect(`${origin}/?auth=error&reason=missing_code`);
   }
 
-  const supabase = await supabaseServer();
+  let res = NextResponse.redirect(`${origin}${next}`);
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return req.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            // ensure cookie lands in the browser
+            res.cookies.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
+
   const { error } = await supabase.auth.exchangeCodeForSession(code);
 
   if (error) {
     return NextResponse.redirect(
-      new URL(
-        `/?auth=error&reason=exchange_failed&message=${encodeURIComponent(error.message)}`,
-        url.origin
-      )
+      `${origin}/?auth=error&reason=exchange_failed&message=${encodeURIComponent(
+        error.message
+      )}`
     );
   }
 
-  return NextResponse.redirect(new URL(next, url.origin));
+  return res;
 }
