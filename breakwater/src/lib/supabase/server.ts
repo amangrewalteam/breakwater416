@@ -1,6 +1,12 @@
-// lib/supabase/server.ts
+// src/lib/supabase/server.ts
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+
+type CookieToSet = {
+  name: string;
+  value: string;
+  options?: Parameters<ReturnType<typeof cookies>["set"]>[2];
+};
 
 export async function supabaseServer() {
   const cookieStore = await cookies();
@@ -17,14 +23,13 @@ export async function supabaseServer() {
       getAll() {
         return cookieStore.getAll();
       },
-      setAll(cookiesToSet) {
+      setAll(cookiesToSet: CookieToSet[]) {
         try {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set(name, value, options);
           });
         } catch {
-          // In some edge cases Next can throw if called in an unsupported context.
-          // The auth flow still works in Route Handlers where cookies are mutable.
+          // In some contexts Next doesn't allow setting cookies; route handlers should be fine.
         }
       },
     },
