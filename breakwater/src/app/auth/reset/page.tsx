@@ -1,7 +1,8 @@
+// src/app/auth/reset/page.tsx
 "use client";
 
 import { useEffect } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
 function safeNextPath(nextParam: string | null) {
@@ -12,36 +13,32 @@ function safeNextPath(nextParam: string | null) {
 
 export default function AuthResetPage() {
   const router = useRouter();
-  const params = useSearchParams();
 
   useEffect(() => {
+    // Read next from the URL without useSearchParams (avoids Suspense/prerender issues)
+    const params = new URLSearchParams(window.location.search);
     const next = safeNextPath(params.get("next"));
 
-    // 1) Clear Supabase localStorage keys (PKCE verifier lives here)
+    // 1) Clear Supabase localStorage keys (PKCE verifier often lives here)
     try {
       const keys = Object.keys(window.localStorage);
       for (const k of keys) {
-        if (k.toLowerCase().includes("supabase")) {
-          window.localStorage.removeItem(k);
-        }
-        // some projects store under "sb-<project-ref>-auth-token"
-        if (k.toLowerCase().startsWith("sb-") && k.toLowerCase().includes("auth")) {
-          window.localStorage.removeItem(k);
-        }
+        const lk = k.toLowerCase();
+        if (lk.includes("supabase")) window.localStorage.removeItem(k);
+        if (lk.startsWith("sb-") && lk.includes("auth")) window.localStorage.removeItem(k);
       }
     } catch {}
 
-    // 2) Best-effort sign out (also helps clear any cached client state)
+    // 2) Best-effort sign out (clears client state; server cookies are handled by callback)
     (async () => {
       try {
         const supabase = supabaseBrowser();
         await supabase.auth.signOut();
       } catch {}
 
-      // 3) Hard refresh navigation so you’re clean
       router.replace(next);
     })();
-  }, [params, router]);
+  }, [router]);
 
   return (
     <main style={{ padding: 24 }}>
