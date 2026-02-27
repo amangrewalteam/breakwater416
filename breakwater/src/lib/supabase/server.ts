@@ -1,8 +1,15 @@
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+import type { NextResponse } from "next/server";
 
-export function supabaseServer() {
-  const cookieStore = cookies();
+type CookieToSet = {
+  name: string;
+  value: string;
+  options?: Parameters<NextResponse["cookies"]["set"]>[2];
+};
+
+export async function supabaseServer() {
+  const cookieStore = await cookies();
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -12,9 +19,7 @@ export function supabaseServer() {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet) {
-          // Next.js App Router allows setting cookies in Route Handlers & Server Actions.
-          // This is the key to making PKCE work reliably in SSR.
+        setAll(cookiesToSet: CookieToSet[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set(name, value, options);
           });
