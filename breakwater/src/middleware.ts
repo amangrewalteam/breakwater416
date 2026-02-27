@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
+type CookieToSet = {
+  name: string;
+  value: string;
+  options?: Parameters<NextResponse["cookies"]["set"]>[2];
+};
+
 export async function middleware(req: NextRequest) {
   let res = NextResponse.next({
     request: { headers: req.headers },
@@ -14,7 +20,7 @@ export async function middleware(req: NextRequest) {
         getAll() {
           return req.cookies.getAll();
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: CookieToSet[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
             // Set on request (so supabase sees it immediately)…
             req.cookies.set(name, value);
@@ -26,20 +32,12 @@ export async function middleware(req: NextRequest) {
     }
   );
 
-  // This refreshes session cookies when needed (important on SSR + Vercel)
+  // Refresh session cookies when needed (important on SSR + Vercel)
   await supabase.auth.getUser();
 
   return res;
 }
 
 export const config = {
-  matcher: [
-    /*
-      Run middleware on all routes except:
-      - next static assets
-      - images
-      - favicon
-    */
-    "/((?!_next/static|_next/image|favicon.ico).*)",
-  ],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };

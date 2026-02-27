@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
+// Minimal type for the cookie batch Supabase passes to setAll
+type CookieToSet = {
+  name: string;
+  value: string;
+  options?: Parameters<NextResponse["cookies"]["set"]>[2];
+};
+
 export async function GET(req: NextRequest) {
   const { searchParams, origin } = new URL(req.url);
   const code = searchParams.get("code");
@@ -10,7 +17,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(`${origin}/?auth=error&reason=missing_code`);
   }
 
-  let res = NextResponse.redirect(`${origin}${next}`);
+  // Create redirect response now so we can attach cookies onto it
+  const res = NextResponse.redirect(`${origin}${next}`);
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -20,9 +28,8 @@ export async function GET(req: NextRequest) {
         getAll() {
           return req.cookies.getAll();
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: CookieToSet[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
-            // ensure cookie lands in the browser
             res.cookies.set(name, value, options);
           });
         },
