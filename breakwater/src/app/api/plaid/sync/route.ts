@@ -8,6 +8,7 @@ import type {
 } from "plaid";
 import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,41 +32,28 @@ function getNumber(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
-/**
- * Map Plaid transaction -> DB row
- * Adjust columns to match your schema if needed.
- */
 function mapTransactionRow(userId: string, itemId: string, t: Transaction) {
   return {
     user_id: userId,
     item_id: itemId,
     transaction_id: t.transaction_id,
-
     account_id: t.account_id,
     name: t.name ?? null,
     merchant_name: t.merchant_name ?? null,
     amount: t.amount,
     iso_currency_code: t.iso_currency_code ?? null,
     unofficial_currency_code: t.unofficial_currency_code ?? null,
-
     date: t.date,
     authorized_date: t.authorized_date ?? null,
-
     category_id: t.category_id ?? null,
     category: Array.isArray(t.category) ? t.category : null,
-
     pending: t.pending,
     transaction_type: t.transaction_type ?? null,
     payment_channel: t.payment_channel ?? null,
-
     updated_at: new Date().toISOString(),
   };
 }
 
-/**
- * Map Plaid account -> DB row
- * If you want balances, switch to importing `Account` (not AccountBase) and map balances.
- */
 function mapAccountRow(userId: string, itemId: string, a: AccountBase) {
   return {
     user_id: userId,
@@ -82,12 +70,11 @@ function mapAccountRow(userId: string, itemId: string, a: AccountBase) {
 
 /**
  * POST /api/plaid/sync
- * Body (optional):
- *   { full?: boolean, maxPages?: number }
+ * Body (optional): { full?: boolean, maxPages?: number }
  */
 export async function POST(req: Request) {
+  // Auth via cookie session
   const supabase = await supabaseServer();
-
   const {
     data: { user },
     error: authErr,
@@ -107,7 +94,11 @@ export async function POST(req: Request) {
   const full = getBool(body.full, false);
   const maxPages = Math.max(1, Math.min(50, getNumber(body.maxPages, 25)));
 
-  const { data: items, error: itemsErr } = await supabase
+  // Use service-role client for all DB reads/writes on plaid_* tables.
+  // This bypasses RLS so the token is always readable and writes always land.
+  const admin = supabaseAdmin();
+
+  const { data: items, error: itemsErr } = await admin
     .from("plaid_items")
     .select("item_id, access_token, cursor")
     .eq("user_id", user.id);
@@ -117,29 +108,37 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, items: 0, added: 0, modified: 0, removed: 0 });
   }
 
+  // Guard: reject rows without a token rather than letting Plaid return a cryptic error
+  const validItems = items.filter((i) => i.access_token);
+  if (validItems.length === 0) {
+    return jsonError(
+      "No Plaid access_token on file. Reconnect your bank.",
+      422,
+      { items_found: items.length }
+    );
+  }
+
   let totalAdded = 0;
   let totalModified = 0;
   let totalRemoved = 0;
 
-  for (const item of items) {
+  for (const item of validItems) {
     const itemId = String(item.item_id);
     const accessToken = String(item.access_token);
 
+    console.log(`[plaid.sync] starting sync for item ${itemId}, token …${accessToken.slice(-6)}`);
+
     let cursor: string | undefined = full ? undefined : item.cursor ? String(item.cursor) : undefined;
     let hasMore = true;
-
-    // NOTE: Some Plaid SDK typings omit `accounts` on TransactionsSyncResponse in certain versions.
-    // We'll treat it as runtime-optional but keep TS-safe types here.
     let accounts: AccountBase[] = [];
     const added: Transaction[] = [];
     const modified: Transaction[] = [];
     const removed: RemovedTx[] = [];
-
     let page = 0;
 
     while (hasMore) {
       page += 1;
-      if (page > maxPages) break; // safety valve
+      if (page > maxPages) break;
 
       const request: TransactionsSyncRequest = {
         access_token: accessToken,
@@ -157,23 +156,23 @@ export async function POST(req: Request) {
 
       const data = resp.data;
 
-      // --- Runtime-safe extraction (TS-safe) ---
       const runtimeAccounts = (data as unknown as { accounts?: AccountBase[] }).accounts;
       if (Array.isArray(runtimeAccounts)) accounts = runtimeAccounts;
 
       added.push(...(((data as unknown as { added?: Transaction[] }).added) ?? []));
       modified.push(...(((data as unknown as { modified?: Transaction[] }).modified) ?? []));
       removed.push(...(((data as unknown as { removed?: RemovedTx[] }).removed) ?? []));
-      // ----------------------------------------
 
       cursor = data.next_cursor;
       hasMore = Boolean(data.has_more);
     }
 
-    // Upsert accounts (optional)
+    console.log(`[plaid.sync] item ${itemId}: added=${added.length} modified=${modified.length} removed=${removed.length}`);
+
+    // Upsert accounts
     if (accounts.length > 0) {
       const accountRows = accounts.map((a) => mapAccountRow(user.id, itemId, a));
-      const { error: acctUpsertErr } = await supabase
+      const { error: acctUpsertErr } = await admin
         .from("plaid_accounts")
         .upsert(accountRows, { onConflict: "account_id" });
 
@@ -188,7 +187,7 @@ export async function POST(req: Request) {
     // Upsert transactions (added + modified)
     const txRows = [...added, ...modified].map((t) => mapTransactionRow(user.id, itemId, t));
     if (txRows.length > 0) {
-      const { error: txUpsertErr } = await supabase
+      const { error: txUpsertErr } = await admin
         .from("plaid_transactions")
         .upsert(txRows, { onConflict: "transaction_id" });
 
@@ -207,7 +206,7 @@ export async function POST(req: Request) {
         .filter((id): id is string => typeof id === "string" && id.length > 0);
 
       if (removedIds.length > 0) {
-        const { error: delErr } = await supabase
+        const { error: delErr } = await admin
           .from("plaid_transactions")
           .delete()
           .in("transaction_id", removedIds)
@@ -223,7 +222,7 @@ export async function POST(req: Request) {
     }
 
     // Persist cursor
-    const { error: cursorErr } = await supabase
+    const { error: cursorErr } = await admin
       .from("plaid_items")
       .update({ cursor: cursor ?? null, updated_at: new Date().toISOString() })
       .eq("user_id", user.id)
@@ -241,9 +240,11 @@ export async function POST(req: Request) {
     totalRemoved += removed.length;
   }
 
+  console.log(`[plaid.sync] done: items=${validItems.length} added=${totalAdded} modified=${totalModified} removed=${totalRemoved}`);
+
   return NextResponse.json({
     ok: true,
-    items: items.length,
+    items: validItems.length,
     added: totalAdded,
     modified: totalModified,
     removed: totalRemoved,
