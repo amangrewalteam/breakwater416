@@ -14,6 +14,14 @@ DELETE FROM plaid_items
  );
 
 -- ---------------------------------------------------------------------------
+-- Step 1b: Delete rows that have no usable access_token.
+--          These are dead records; reconnecting the bank will create a fresh row.
+-- ---------------------------------------------------------------------------
+
+DELETE FROM plaid_items
+ WHERE access_token IS NULL OR access_token = '';
+
+-- ---------------------------------------------------------------------------
 -- Step 2: Drop the old composite unique constraint (user_id, item_id)
 --         and replace with a simple unique on user_id.
 --         This enforces exactly one bank connection per user.
