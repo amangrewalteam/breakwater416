@@ -28,20 +28,20 @@ export async function POST(req: Request) {
 
     const itemId = body.item_id;
 
-    // Load stored access token + cursor
+    // Load stored access token + cursor from DB — never from files
     const { data: itemRow, error: itemErr } = await supabase
       .from("plaid_items")
-      .select("access_token_enc,cursor")
+      .select("access_token,cursor")
       .eq("user_id", userId)
       .eq("item_id", itemId)
       .maybeSingle();
 
-    if (itemErr || !itemRow?.access_token_enc) {
+    if (itemErr || !itemRow?.access_token) {
       log("transactions.sync.item_not_found", { userId, itemId });
-      return NextResponse.json({ error: "Item not found" }, { status: 404 });
+      return NextResponse.json({ error: "Item not found or access token missing" }, { status: 404 });
     }
 
-    const access_token = itemRow.access_token_enc; // Phase 3.2 will decrypt
+    const access_token = itemRow.access_token;
     let cursor: string | null = itemRow.cursor ?? null;
 
     // Cursor-based sync loop

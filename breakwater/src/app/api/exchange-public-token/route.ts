@@ -36,14 +36,14 @@ export async function POST(req: Request) {
     const access_token = exchange.data.access_token;
     const item_id = exchange.data.item_id;
 
-    // Store item + access_token (NOTE: Phase 3.2 will encrypt; for now store as-is)
+    // Store item + access_token in plaid_items
     const upsertResp = await supabase
       .from("plaid_items")
       .upsert(
         {
           user_id: userId,
           item_id,
-          access_token_enc: access_token,
+          access_token,
           institution_name: body.institution_name ?? null,
           updated_at: new Date().toISOString(),
         },
