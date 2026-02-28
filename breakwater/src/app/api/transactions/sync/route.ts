@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 import { log, logError } from "@/lib/log";
 
 type Body = { item_id?: string };
@@ -10,6 +11,7 @@ export async function POST(req: Request) {
   log("transactions.sync.start");
 
   try {
+    // 1. Authenticate via cookie session
     const supabase = await supabaseServer();
     const { data, error } = await supabase.auth.getUser();
 
@@ -20,31 +22,42 @@ export async function POST(req: Request) {
 
     const userId = data.user.id;
     const body = (await req.json().catch(() => ({}))) as Body;
+    const itemId = body.item_id;
 
-    if (!body.item_id) {
+    if (!itemId) {
       log("transactions.sync.bad_request", { userId });
       return NextResponse.json({ error: "Missing item_id" }, { status: 400 });
     }
 
-    const itemId = body.item_id;
-
-    // Load stored access token + cursor from DB — never from files
-    const { data: itemRow, error: itemErr } = await supabase
+    // 2. Load access_token from DB via service-role client.
+    //    Service role bypasses RLS so the token is always returned — never NULL due to policy gaps.
+    const admin = supabaseAdmin();
+    const { data: itemRow, error: itemErr } = await admin
       .from("plaid_items")
-      .select("access_token,cursor")
+      .select("access_token, cursor")
       .eq("user_id", userId)
       .eq("item_id", itemId)
       .maybeSingle();
 
-    if (itemErr || !itemRow?.access_token) {
-      log("transactions.sync.item_not_found", { userId, itemId });
-      return NextResponse.json({ error: "Item not found or access token missing" }, { status: 404 });
+    if (itemErr) {
+      logError("transactions.sync.item_query_error", itemErr);
+      return NextResponse.json({ error: "Failed to query Plaid item" }, { status: 500 });
+    }
+
+    if (!itemRow?.access_token) {
+      log("transactions.sync.no_token", { userId, itemId });
+      return NextResponse.json(
+        { error: "No Plaid access_token on file. Reconnect your bank." },
+        { status: 422 }
+      );
     }
 
     const access_token = itemRow.access_token;
     let cursor: string | null = itemRow.cursor ?? null;
 
-    // Cursor-based sync loop
+    log("transactions.sync.plaid_start", { userId, itemId, tokenTail: access_token.slice(-6) });
+
+    // 3. Cursor-based sync loop
     let addedCount = 0;
     let modifiedCount = 0;
     let removedCount = 0;
@@ -59,7 +72,6 @@ export async function POST(req: Request) {
 
       const { added, modified, removed, next_cursor } = resp.data;
 
-      // Upsert added + modified into plaid_transactions
       const toUpsert = [...added, ...modified].map((t) => ({
         user_id: userId,
         item_id: itemId,
@@ -72,24 +84,21 @@ export async function POST(req: Request) {
         authorized_date: t.authorized_date ?? null,
         date: t.date,
         pending: t.pending,
-        category: (t.category ?? null) as any,
+        category: (t.category ?? null) as string[] | null,
+        updated_at: new Date().toISOString(),
       }));
 
       if (toUpsert.length) {
-        const up = await supabase
+        const { error: upErr } = await admin
           .from("plaid_transactions")
-          .upsert(toUpsert, { onConflict: "user_id,transaction_id" });
+          .upsert(toUpsert, { onConflict: "transaction_id" });
 
-        if (up.error) {
-          log("transactions.sync.db_error", { userId, itemId });
-          return NextResponse.json(
-            { error: "Failed to upsert transactions" },
-            { status: 500 }
-          );
+        if (upErr) {
+          logError("transactions.sync.db_error", upErr);
+          return NextResponse.json({ error: "Failed to upsert transactions" }, { status: 500 });
         }
       }
 
-      // Removed: optional (you can mark deleted later; for now we just count)
       addedCount += added.length;
       modifiedCount += modified.length;
       removedCount += removed.length;
@@ -98,28 +107,19 @@ export async function POST(req: Request) {
       has_more = resp.data.has_more;
     }
 
-    // Save new cursor
-    const save = await supabase
+    // 4. Save new cursor
+    const { error: cursorErr } = await admin
       .from("plaid_items")
       .update({ cursor, updated_at: new Date().toISOString() })
       .eq("user_id", userId)
       .eq("item_id", itemId);
 
-    if (save.error) {
-      log("transactions.sync.cursor_save_error", { userId, itemId });
-      return NextResponse.json(
-        { error: "Failed to save cursor" },
-        { status: 500 }
-      );
+    if (cursorErr) {
+      logError("transactions.sync.cursor_save_error", cursorErr);
+      return NextResponse.json({ error: "Failed to save cursor" }, { status: 500 });
     }
 
-    log("transactions.sync.ok", {
-      userId,
-      itemId,
-      added: addedCount,
-      modified: modifiedCount,
-      removed: removedCount,
-    });
+    log("transactions.sync.ok", { userId, itemId, added: addedCount, modified: modifiedCount, removed: removedCount });
 
     return NextResponse.json({
       ok: true,
@@ -128,7 +128,7 @@ export async function POST(req: Request) {
       modified: modifiedCount,
       removed: removedCount,
     });
-  } catch (e: any) {
+  } catch (e: unknown) {
     logError("transactions.sync.err", e);
     return NextResponse.json({ error: "Sync failed" }, { status: 500 });
   }
