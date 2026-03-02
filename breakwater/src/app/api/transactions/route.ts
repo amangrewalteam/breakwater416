@@ -1,50 +1,47 @@
+// src/app/api/transactions/route.ts
+// Returns transactions for the authenticated user from the DB.
+// No file I/O. No direct Plaid calls. Token lives in plaid_items.
 import { NextResponse } from "next/server";
-import { plaidClient } from "@/lib/plaid";
-import fs from "fs";
-import path from "path";
+import { supabaseServer } from "@/lib/supabase/server";
 
-const TOKEN_PATH = path.join(process.cwd(), ".plaid_access_token");
-
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    if (!fs.existsSync(TOKEN_PATH)) {
+    const supabase = await supabaseServer();
+
+    const { data: authData, error: authErr } = await supabase.auth.getUser();
+    if (authErr || !authData?.user) {
       return NextResponse.json(
-        { error: "No access token yet. Connect a bank first." },
+        { error: "Unauthorized" },
         { status: 401 }
       );
     }
 
-    const access_token = fs.readFileSync(TOKEN_PATH, "utf8").trim();
-    if (!access_token) {
+    const userId = authData.user.id;
+
+    const { data: rows, error: txErr } = await supabase
+      .from("plaid_transactions")
+      .select(
+        "transaction_id, account_id, name, merchant_name, amount, " +
+        "iso_currency_code, date, authorized_date, category, pending, " +
+        "payment_channel, created_at"
+      )
+      .eq("user_id", userId)
+      .order("date", { ascending: false })
+      .limit(500);
+
+    if (txErr) {
       return NextResponse.json(
-        { error: "Access token file is empty. Reconnect bank." },
-        { status: 401 }
+        { error: "Failed to load transactions" },
+        { status: 500 }
       );
     }
 
-    const end_date = todayISO();
-    const start_date = "2024-01-01";
-
-    const resp = await plaidClient.transactionsGet({
-      access_token,
-      start_date,
-      end_date,
-      options: {
-        count: 250,
-        offset: 0,
-      },
-    });
-
-    return NextResponse.json(resp.data.transactions);
-  } catch (e: any) {
-    console.error("transactions error:", e?.response?.data || e);
-    return NextResponse.json(
-      { error: "Failed to fetch transactions" },
-      { status: 500 }
-    );
+    return NextResponse.json(rows ?? []);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Unexpected error";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

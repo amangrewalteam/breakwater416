@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { plaidClient } from "@/lib/plaid";
 import { supabaseServer } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 import { log, logError } from "@/lib/log";
 
 type Body = {
@@ -13,6 +14,7 @@ export async function POST(req: Request) {
   log("plaid.exchange.start");
 
   try {
+    // 1. Authenticate via cookie session (anon client is fine for auth.getUser)
     const supabase = await supabaseServer();
     const { data, error } = await supabase.auth.getUser();
 
@@ -31,39 +33,46 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing public_token" }, { status: 400 });
     }
 
+    // 2. Exchange with Plaid
     const exchange = await plaidClient.itemPublicTokenExchange({ public_token });
-
     const access_token = exchange.data.access_token;
     const item_id = exchange.data.item_id;
 
-    // Store item + access_token (NOTE: Phase 3.2 will encrypt; for now store as-is)
-    const upsertResp = await supabase
+    log("plaid.exchange.plaid_ok", {
+      userId,
+      itemId: item_id,
+      tokenTail: access_token.slice(-6),
+    });
+
+    // 3. Persist via service-role client (bypasses RLS — safe for server-only route).
+    //    onConflict: "user_id" — one row per user; reconnecting the same or a new bank
+    //    replaces the old row rather than creating duplicates.
+    const admin = supabaseAdmin();
+    const { error: upsertErr } = await admin
       .from("plaid_items")
       .upsert(
         {
           user_id: userId,
           item_id,
-          access_token_enc: access_token,
+          access_token,
           institution_name: body.institution_name ?? null,
           updated_at: new Date().toISOString(),
         },
-        { onConflict: "user_id,item_id" }
-      )
-      .select("item_id")
-      .maybeSingle();
+        { onConflict: "user_id" }
+      );
 
-    if (upsertResp.error) {
-      log("plaid.exchange.db_error", { userId, itemId: item_id });
+    if (upsertErr) {
+      logError("plaid.exchange.db_error", upsertErr);
       return NextResponse.json(
-        { error: "Failed to save Plaid item" },
+        { error: "Failed to save Plaid item", detail: upsertErr.message },
         { status: 500 }
       );
     }
 
-    log("plaid.exchange.ok", { userId, itemId: item_id });
+    log("plaid.exchange.db_ok", { userId, itemId: item_id, tokenTail: access_token.slice(-6) });
 
-    return NextResponse.json({ item_id });
-  } catch (e: any) {
+    return NextResponse.json({ ok: true, item_id });
+  } catch (e: unknown) {
     logError("plaid.exchange.err", e);
     return NextResponse.json(
       { error: "Failed to exchange public token" },
